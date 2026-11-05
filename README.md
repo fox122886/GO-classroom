@@ -54,6 +54,16 @@ python3 build.py                # 產生 out/gas/* 與 out/preview.html
 1. 在 Apps Script 專案裡建立 `Code.gs`，以及 `index`、`lib`、`content`、`ldbank`、`classic`、`app` 六個 HTML 檔，內容分別貼上 `out/gas/` 對應的檔案。
 2. 部署 → 新增部署作業 → 網頁應用程式；執行身分選「存取網頁應用程式的使用者」，存取權選「所有已登入 Google 帳戶的使用者」。
 
-## 來源與授權
+## 授權
 
-請見 [NOTICE.md](NOTICE.md)。經典題庫中的 Go Game Guru 題目與其中文翻譯採 **CC BY-NC-SA 4.0**，只能用於非商業用途。
+本專案採用分開授權：
+
+| 範圍 | 授權 |
+| --- | --- |
+| 程式碼、建置與驗證工具、課文、圖例、課程題目、固定題庫、無限練習與死活題庫 | [MIT](LICENSE) |
+| Go Game Guru 題目資料與其中文翻譯：`src/classic_data.js`（GGG 部分）、`tools/classic_notes_zh.json`、`tools/classic_notes_en.json` | [CC BY-NC-SA 4.0](LICENSE-DATA)（非商業、相同方式分享） |
+| 《官子譜》題目 | 公有領域 |
+
+建置好的 `out/gas/classic.html` 和 `out/preview.html` 內含 Go Game Guru 的題目資料，散布或使用這兩個檔案時，該部分須遵守 CC BY-NC-SA 4.0：只能用於非商業用途，並且要標示來源。只使用程式碼的話，照 MIT 授權即可，商業用途也可以。
+
+來源、作者與修改內容的詳細說明請見 [NOTICE.md](NOTICE.md)。

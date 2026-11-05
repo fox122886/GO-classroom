@@ -1,6 +1,12 @@
 # 來源與授權說明
 
-## 本專案自行撰寫的部分
+## 授權總覽
+
+- 本專案自行撰寫的部分採 MIT 授權（見 `LICENSE`）。
+- Go Game Guru 的題目資料與中文翻譯採 CC BY-NC-SA 4.0（見 `LICENSE-DATA`）。
+- 《官子譜》題目屬公有領域。
+
+## 本專案自行撰寫的部分（MIT）
 
 課文、比喻、圖例、課程題目、固定題庫、無限練習出題程式、死活題庫產生程式、規則引擎、電腦對手與介面，都是本專案自行撰寫。課程的主題範圍與先後順序參考了下列教材（只參考結構，沒有使用其題目或內文）；各課參考了哪些來源，列在 `src/lessons.js` 的 `SOURCES` 與 `LESSON_REFS`，網頁的「資源」頁也有列出：
 
@@ -11,7 +17,7 @@
 
 ## 經典題庫（`src/classic_data.js`、`tools/classic_notes_*.json`）
 
-### Go Game Guru：Weekly Go Problems
+### Go Game Guru：Weekly Go Problems（CC BY-NC-SA 4.0）
 
 - 來源：https://github.com/gogameguru/go-problems （commit `eee12b2e39d59dbe81a8b9eaa7d4f103978d9224`）
 - 作者：An Younggil（職業八段）、David Ormerod，Go Game Guru
@@ -22,7 +28,7 @@
   - 把原作者的英文講解翻譯成中文（`tools/classic_notes_zh.json`）。英文原文保存在 `tools/classic_notes_en.json`。
 - 依照「相同方式分享」條款，上述改作（題目資料與中文翻譯）同樣以 **CC BY-NC-SA 4.0** 提供，不得用於商業用途。
 
-### 《官子譜》
+### 《官子譜》（公有領域）
 
 - 明代過百齡原著，清代陶式玉編注，屬公有領域。
 - SGF 資料：由 Flygo 整理，Ulrich Goertz 在 https://www.u-go.net/classic/ 發布並註明可轉載。本專案使用 https://github.com/tasuki/tsumego （commit `3e6931959f13d33fc390ad8adbaabc301e4dd404`）收錄的版本，以及該專案去除重複後的 1107 題編號（`books/sources/guanzi-pu/source-map.csv`）。
