@@ -1,0 +1,768 @@
+<script>
+// ===== Go engine (rules + small capture search) =====
+const Go = (() => {
+  function parse(rows) {
+    const n = rows.length, g = new Array(n * n).fill(0);
+    rows.forEach((row, r) => {
+      for (let c = 0; c < n; c++) {
+        const ch = row[c];
+        g[r * n + c] = ch === 'X' ? 1 : ch === 'O' ? 2 : 0;
+      }
+    });
+    return { n, g };
+  }
+  function nb(n, i) {
+    const r = Math.floor(i / n), c = i % n, a = [];
+    if (r > 0) a.push(i - n);
+    if (r < n - 1) a.push(i + n);
+    if (c > 0) a.push(i - 1);
+    if (c < n - 1) a.push(i + 1);
+    return a;
+  }
+  function group(n, g, i) {
+    const col = g[i];
+    if (!col) return null;
+    const stones = [i], seen = new Set([i]), libs = new Set();
+    for (let k = 0; k < stones.length; k++) {
+      for (const j of nb(n, stones[k])) {
+        if (g[j] === 0) libs.add(j);
+        else if (g[j] === col && !seen.has(j)) { seen.add(j); stones.push(j); }
+      }
+    }
+    return { color: col, stones, libs };
+  }
+  function play(n, g, i, col, ko) {
+    if (g[i] !== 0) return { ok: false, reason: 'occupied' };
+    if (i === ko) return { ok: false, reason: 'ko' };
+    const ng = g.slice();
+    ng[i] = col;
+    const opp = 3 - col, captured = [];
+    for (const j of nb(n, i)) {
+      if (ng[j] === opp) {
+        const gr = group(n, ng, j);
+        if (gr.libs.size === 0) for (const s of gr.stones) { ng[s] = 0; captured.push(s); }
+      }
+    }
+    const me = group(n, ng, i);
+    if (me.libs.size === 0) return { ok: false, reason: 'suicide' };
+    let newKo = -1;
+    if (captured.length === 1 && me.stones.length === 1 && me.libs.size === 1) newKo = captured[0];
+    return { ok: true, g: ng, captured, ko: newKo };
+  }
+  // attacker to move: can the group at t be captured?
+  function attackerWins(n, g, t, depth, ko) {
+    if (g[t] === 0) return true;
+    const gr = group(n, g, t);
+    if (gr.libs.size > 2 || depth <= 0) return false;
+    for (const m of gr.libs) {
+      const r = play(n, g, m, 3 - gr.color, ko);
+      if (!r.ok) continue;
+      if (r.g[t] === 0) return true;
+      if (defenderLoses(n, r.g, t, depth - 1, r.ko)) return true;
+    }
+    return false;
+  }
+  function defenderMoves(n, g, t) {
+    const gr = group(n, g, t), set = new Set(gr.libs);
+    for (const s of gr.stones) for (const j of nb(n, s)) {
+      if (g[j] === 3 - gr.color) {
+        const ag = group(n, g, j);
+        if (ag.libs.size === 1) ag.libs.forEach(x => set.add(x));
+      }
+    }
+    return [...set];
+  }
+  // defender to move: does the target die anyway?
+  function defenderLoses(n, g, t, depth, ko) {
+    if (g[t] === 0) return true;
+    const gr = group(n, g, t);
+    if (gr.libs.size >= 3) return false;
+    let any = false;
+    for (const m of defenderMoves(n, g, t)) {
+      const r = play(n, g, m, gr.color, ko);
+      if (!r.ok) continue;
+      any = true;
+      if (!attackerWins(n, r.g, t, depth, r.ko)) return false;
+    }
+    if (!any) return attackerWins(n, g, t, depth, -1);
+    return true;
+  }
+  // choose the defender's reply in a capture exercise
+  function bestDefense(n, g, t, ko) {
+    const gr = group(n, g, t);
+    let fallback = null, fallbackLibs = -1;
+    for (const m of defenderMoves(n, g, t)) {
+      const r = play(n, g, m, gr.color, ko);
+      if (!r.ok) continue;
+      if (!attackerWins(n, r.g, t, 24, r.ko)) return { move: m, res: r, escaped: true };
+      const libs = group(n, r.g, t).libs.size;
+      if (libs > fallbackLibs) { fallbackLibs = libs; fallback = { move: m, res: r, escaped: false }; }
+    }
+    return fallback;
+  }
+  // ---- local life & death / semeai solver ----
+  // Moves are limited to `region`. The attacker wins when `target` is captured;
+  // the attacker loses when `own` (optional) is captured or both sides pass.
+  function solveLocal(n, g, toMove, attacker, region, target, own, ko, passes, depth, memo) {
+    if (g[target] === 0) return true;
+    if (own >= 0 && g[own] === 0) return false;
+    if (passes >= 2 || depth <= 0) return false;
+    const k = g.join('') + toMove + ':' + ko + ':' + passes;
+    if (memo.has(k)) return memo.get(k);
+    memo.set(k, false);
+    const atk = toMove === attacker;
+    let result = atk ? false : true;
+    const tryNext = (ng, nko, np) => solveLocal(n, ng, 3 - toMove, attacker, region, target, own, nko, np, depth - 1, memo);
+    for (const m of region) {
+      if (g[m] !== 0) continue;
+      const r = play(n, g, m, toMove, ko);
+      if (!r.ok) continue;
+      const v = tryNext(r.g, r.ko, 0);
+      if (atk && v) { result = true; break; }
+      if (!atk && !v) { result = false; break; }
+    }
+    if (atk ? !result : result) {
+      const v = tryNext(g, -1, passes + 1);
+      if (atk && v) result = true;
+      if (!atk && !v) result = false;
+    }
+    memo.set(k, result);
+    return result;
+  }
+  // after a move by `mover`, does the problem still go the mover's way?
+  function localOutcome(n, g, toMove, p, ko) {
+    const memo = new Map();
+    const atkWins = solveLocal(n, g, toMove, p.attacker, p.region, p.target, p.own, ko, 0, 40, memo);
+    return atkWins;
+  }
+  // best reply for the side to move; returns {move:-1} for pass
+  function localReply(n, g, toMove, p, ko) {
+    const wantAtk = toMove === p.attacker;
+    let fallback = null;
+    for (const m of p.region) {
+      if (g[m] !== 0) continue;
+      const r = play(n, g, m, toMove, ko);
+      if (!r.ok) continue;
+      const v = localOutcome(n, r.g, 3 - toMove, p, r.ko);
+      if (v === wantAtk || (wantAtk && r.g[p.target] === 0)) return { move: m, res: r, good: true };
+      if (!fallback || r.captured.length > fallback.res.captured.length) fallback = { move: m, res: r, good: false };
+    }
+    return fallback || { move: -1, good: false };
+  }
+  // area score: stones + empty regions touching only one colour. dead = Set of indices removed first.
+  function score(n, g, dead) {
+    const b = g.slice(); if (dead) dead.forEach(i => { b[i] = 0; });
+    const own = new Array(n * n).fill(0); let bs = 0, ws = 0;
+    for (let i = 0; i < n * n; i++) { if (b[i] === 1) { bs++; own[i] = 1; } else if (b[i] === 2) { ws++; own[i] = 2; } }
+    const seen = new Set();
+    for (let i = 0; i < n * n; i++) {
+      if (b[i] !== 0 || seen.has(i)) continue;
+      const area = [i], touch = new Set(); seen.add(i);
+      for (let k = 0; k < area.length; k++) for (const j of nb(n, area[k])) {
+        if (b[j] === 0 && !seen.has(j)) { seen.add(j); area.push(j); } else if (b[j]) touch.add(b[j]);
+      }
+      if (touch.size === 1) { const c = [...touch][0]; area.forEach(a => own[a] = c); if (c === 1) bs += area.length; else ws += area.length; }
+    }
+    return { black: bs, white: ws, own };
+  }
+  return { parse, nb, group, play, attackerWins, defenderLoses, bestDefense, solveLocal, localOutcome, localReply, score };
+})();
+if (typeof module !== 'undefined') module.exports = Go;
+
+// ===== Computer opponent: fast board, simple AI, MCTS =====
+const GoAI = (() => {
+  function makeNbr(n) {
+    const nb = [];
+    for (let i = 0; i < n * n; i++) {
+      const r = Math.floor(i / n), c = i % n, a = [];
+      if (r > 0) a.push(i - n); if (r < n - 1) a.push(i + n);
+      if (c > 0) a.push(i - 1); if (c < n - 1) a.push(i + 1);
+      nb.push(a);
+    }
+    return nb;
+  }
+  function makeDiag(n) {
+    const d = [];
+    for (let i = 0; i < n * n; i++) {
+      const r = Math.floor(i / n), c = i % n, a = [];
+      for (const [dr, dc] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+        const rr = r + dr, cc = c + dc;
+        if (rr >= 0 && rr < n && cc >= 0 && cc < n) a.push(rr * n + cc);
+      }
+      d.push(a);
+    }
+    return d;
+  }
+  const cache = {};
+  function geo(n) { return cache[n] || (cache[n] = { nb: makeNbr(n), dg: makeDiag(n) }); }
+
+  class Board {
+    constructor(n, cells, ko) {
+      this.n = n; this.N = n * n; const G = geo(n); this.nb = G.nb; this.dg = G.dg;
+      this.c = cells ? Int8Array.from(cells) : new Int8Array(n * n);
+      this.ko = ko == null ? -1 : ko;
+      this.mark = new Int32Array(n * n); this.stamp = 0; this.stack = new Int32Array(n * n);
+    }
+    clone() { const b = new Board(this.n, this.c, this.ko); return b; }
+    // number of liberties of group at i, stops counting at `limit`
+    libs(i, limit) {
+      const col = this.c[i], m = this.mark, st = this.stack; const s = ++this.stamp;
+      let sp = 0, cnt = 0; st[sp++] = i; m[i] = s;
+      while (sp) {
+        const p = st[--sp];
+        for (const q of this.nb[p]) {
+          if (m[q] === s) continue;
+          const v = this.c[q];
+          if (v === 0) { m[q] = s; if (++cnt >= limit) return cnt; }
+          else if (v === col) { m[q] = s; st[sp++] = q; }
+        }
+      }
+      return cnt;
+    }
+    // the single liberty of a group in atari (or -1)
+    lastLib(i) {
+      const col = this.c[i], m = this.mark, st = this.stack; const s = ++this.stamp;
+      let sp = 0; st[sp++] = i; m[i] = s;
+      while (sp) {
+        const p = st[--sp];
+        for (const q of this.nb[p]) {
+          if (m[q] === s) continue;
+          const v = this.c[q];
+          if (v === 0) return q;
+          if (v === col) { m[q] = s; st[sp++] = q; }
+        }
+      }
+      return -1;
+    }
+    removeGroup(i) {
+      const col = this.c[i]; let cnt = 0; const st = [i]; this.c[i] = 0;
+      while (st.length) { const p = st.pop(); cnt++; for (const q of this.nb[p]) if (this.c[q] === col) { this.c[q] = 0; st.push(q); } }
+      return cnt;
+    }
+    legal(i, col) {
+      if (this.c[i] !== 0 || i === this.ko) return false;
+      const opp = 3 - col;
+      for (const q of this.nb[i]) {
+        const v = this.c[q];
+        if (v === 0) return true;
+        if (v === opp && this.libs(q, 2) === 1) return true;
+        if (v === col && this.libs(q, 2) >= 2) return true;
+      }
+      return false;
+    }
+    // play assuming legal; returns stones captured
+    play(i, col) {
+      const opp = 3 - col; this.c[i] = col; let cap = 0, capAt = -1;
+      for (const q of this.nb[i]) if (this.c[q] === opp && this.libs(q, 1) === 0) { const k = this.removeGroup(q); cap += k; capAt = q; }
+      this.ko = -1;
+      if (cap === 1) {
+        let lone = true; for (const q of this.nb[i]) if (this.c[q] === col) lone = false;
+        if (lone && this.libs(i, 2) === 1) this.ko = capAt;
+      }
+      return cap;
+    }
+    // point i is an eye-like point for col (do not fill in playouts)
+    isEye(i, col) {
+      if (this.c[i] !== 0) return false;
+      for (const q of this.nb[i]) if (this.c[q] !== col) return false;
+      const d = this.dg[i]; let bad = 0;
+      for (const q of d) if (this.c[q] === 3 - col) bad++;
+      const edge = d.length < 4;
+      return edge ? bad === 0 : bad <= 1;
+    }
+    areaScore() { // returns black - white (no komi), plus owner array
+      let b = 0, w = 0; const own = new Int8Array(this.N);
+      for (let i = 0; i < this.N; i++) {
+        const v = this.c[i];
+        if (v) { own[i] = v; if (v === 1) b++; else w++; continue; }
+        let sb = false, sw = false;
+        for (const q of this.nb[i]) { if (this.c[q] === 1) sb = true; else if (this.c[q] === 2) sw = true; }
+        if (sb && !sw) { b++; own[i] = 1; } else if (sw && !sb) { w++; own[i] = 2; }
+      }
+      return { diff: b - w, own };
+    }
+  }
+
+  // ---------- random playout ----------
+  function playout(b, toMove, maxMoves) {
+    const N = b.N, empties = new Int32Array(N); let passes = 0, moves = 0;
+    while (passes < 2 && moves < maxMoves) {
+      let ne = 0; for (let i = 0; i < N; i++) if (b.c[i] === 0) empties[ne++] = i;
+      let played = false;
+      while (ne > 0) {
+        const k = (Math.random() * ne) | 0, m = empties[k];
+        empties[k] = empties[--ne];
+        if (b.isEye(m, toMove) || !b.legal(m, toMove)) continue;
+        b.play(m, toMove); played = true; break;
+      }
+      passes = played ? 0 : passes + 1; if (!played) b.ko = -1;
+      toMove = 3 - toMove; moves++;
+    }
+    return b.areaScore();
+  }
+
+  // ---------- MCTS (UCT) ----------
+  function candidates(b, col) {
+    const out = [];
+    for (let i = 0; i < b.N; i++) if (b.c[i] === 0 && !b.isEye(i, col) && b.legal(i, col)) out.push(i);
+    return out;
+  }
+  class Node {
+    constructor(move, parent, toMove, p) { this.move = move; this.parent = parent; this.toMove = toMove; this.kids = null; this.untried = null; this.w = 0; this.v = 0; this.p = p || 0; }
+  }
+  // prior knowledge: avoid the edge early, like captures and saving stones in atari
+  function prior(b, m, col) {
+    const n = b.n, r = Math.floor(m / n), c = m % n, line = Math.min(r, c, n - 1 - r, n - 1 - c);
+    let stones = 0; for (let i = 0; i < b.N; i++) if (b.c[i]) stones++;
+    let p = 0;
+    if (line === 0) p -= stones < n * 4 ? 0.5 : 0.15;
+    else if (line === 1 && stones < n * 2) p -= 0.15;
+    else if (line >= 2 && stones < n) p += 0.1;
+    for (const q of b.nb[m]) {
+      const v = b.c[q]; if (!v) continue;
+      if (b.libs(q, 2) === 1) p += v === col ? 0.35 : 0.5;
+    }
+    const t = b.clone(); t.play(m, col); if (t.libs(m, 2) === 1) p -= 0.4;
+    return p;
+  }
+  // options: {timeMs, komi, onDone(result)}; runs in slices so the page stays responsive
+  function think(cells, n, ko, toMove, opts) {
+    const komi = opts.komi == null ? 7 : opts.komi;
+    const root = new Node(-1, null, toMove);
+    const rootB = new Board(n, cells, ko);
+    root.untried = candidates(rootB, toMove).map(m => [m, prior(rootB, m, toMove) + Math.random() * 0.01]).sort((a, b) => a[1] - b[1]).map(x => x[0]); root.kids = [];
+    const ownSum = new Float32Array(n * n); let sims = 0, blackWins = 0;
+    const deadline = Date.now() + (opts.timeMs || 1500);
+    const maxMoves = n * n * 3;
+    function one() {
+      const b = rootB.clone(); let node = root;
+      // selection
+      while (node.untried && node.untried.length === 0 && node.kids.length) {
+        let best = null, bv = -1; const lg = Math.log(node.v + 1);
+        for (const k of node.kids) {
+          const u = k.w / k.v + 0.7 * Math.sqrt(lg / k.v) + k.p / (k.v + 1);
+          if (u > bv) { bv = u; best = k; }
+        }
+        node = best; if (node.move >= 0) b.play(node.move, 3 - node.toMove); else b.ko = -1;
+      }
+      // expansion
+      if (node.untried && node.untried.length) {
+        const m = node.untried.pop();
+        if (b.legal(m, node.toMove)) {
+          const pr = prior(b, m, node.toMove);
+          b.play(m, node.toMove);
+          const child = new Node(m, node, 3 - node.toMove, pr);
+          child.untried = candidates(b, child.toMove).sort(() => Math.random() - .5); child.kids = [];
+          node.kids.push(child); node = child;
+        }
+      } else if (node.untried == null) {
+        node.untried = candidates(b, node.toMove); node.kids = [];
+      }
+      // simulation
+      const res = playout(b, node.toMove, maxMoves);
+      const bWin = res.diff - komi > 0 ? 1 : 0;
+      sims++; blackWins += bWin;
+      for (let i = 0; i < res.own.length; i++) ownSum[i] += res.own[i] === 1 ? 1 : res.own[i] === 2 ? -1 : 0;
+      // backprop: a node's w counts wins for the player who moved into it
+      while (node) {
+        node.v++;
+        const mover = 3 - node.toMove;
+        node.w += mover === 1 ? bWin : 1 - bWin;
+        node = node.parent;
+      }
+    }
+    function finish() {
+      let best = null;
+      for (const k of root.kids) if (!best || k.v > best.v) best = k;
+      const own = Array.from(ownSum, x => sims ? x / sims : 0);
+      const winRate = best ? best.w / best.v : (toMove === 1 ? blackWins / Math.max(1, sims) : 1 - blackWins / Math.max(1, sims));
+      let est = 0; for (const o of own) est += o; // black minus white, points
+      opts.onDone({ move: best ? best.move : -1, winRate, sims, own, blackLead: est - komi, kids: root.kids.map(k => ({ move: k.move, v: k.v, rate: k.w / k.v })) });
+    }
+    if (root.untried.length === 0) { finish(); return; }
+    (function slice() {
+      const end = Date.now() + 30;
+      while (Date.now() < end) one();
+      if (Date.now() < deadline && sims < (opts.maxSims || 60000)) setTimeout(slice, 0); else finish();
+    })();
+  }
+
+  // ---------- simple rule-based AI ----------
+  function simpleMove(cells, n, ko, col) {
+    const b = new Board(n, cells, ko), opp = 3 - col;
+    const legal = []; for (let i = 0; i < b.N; i++) if (b.legal(i, col) && !b.isEye(i, col)) legal.push(i);
+    if (!legal.length) return -1;
+    const sizeOf = i => { let s = 0; const seen = new Set([i]), st = [i]; while (st.length) { const p = st.pop(); s++; for (const q of b.nb[p]) if (!seen.has(q) && b.c[q] === b.c[i]) { seen.add(q); st.push(q); } } return s; };
+    // 1) capture the biggest opponent group in atari
+    let best = -1, bestSize = 0;
+    for (let i = 0; i < b.N; i++) if (b.c[i] === opp && b.libs(i, 2) === 1) {
+      const l = b.lastLib(i), s = sizeOf(i);
+      if (l >= 0 && b.legal(l, col) && s > bestSize) { best = l; bestSize = s; }
+    }
+    if (best >= 0 && Math.random() < 0.9) return best;
+    // 2) save own group in atari by extending, if that gives 2+ liberties
+    for (let i = 0; i < b.N; i++) if (b.c[i] === col && b.libs(i, 2) === 1) {
+      const l = b.lastLib(i);
+      if (l >= 0 && b.legal(l, col)) { const t = b.clone(); t.play(l, col); if (t.libs(l, 3) >= 2 && Math.random() < 0.85) return l; }
+    }
+    // 3) atari opponent groups with two liberties sometimes
+    const ataris = [];
+    for (const m of legal) {
+      for (const q of b.nb[m]) if (b.c[q] === opp && b.libs(q, 3) === 2) { const t = b.clone(); t.play(m, col); if (t.libs(m, 3) >= 2) ataris.push(m); break; }
+    }
+    if (ataris.length && Math.random() < 0.4) return ataris[(Math.random() * ataris.length) | 0];
+    // 4) otherwise a safe move near stones (avoid self-atari and the first line early)
+    const safe = legal.filter(m => { const t = b.clone(); t.play(m, col); return t.libs(m, 3) >= 2; });
+    const pool = safe.length ? safe : legal;
+    const stones = cells.reduce((a, v) => a + (v ? 1 : 0), 0);
+    const weighted = [];
+    for (const m of pool) {
+      const r = Math.floor(m / n), c = m % n, line = Math.min(r, c, n - 1 - r, n - 1 - c);
+      let w = line === 0 ? 0.2 : line === 1 ? 1 : 2;
+      if (stones < 6 && line === 2) w = 4;
+      for (const q of b.nb[m]) if (b.c[q]) w += 1;
+      weighted.push([m, w]);
+    }
+    let tot = weighted.reduce((a, x) => a + x[1], 0), r = Math.random() * tot;
+    for (const [m, w] of weighted) { r -= w; if (r <= 0) return m; }
+    return pool[0];
+  }
+
+  return { Board, think, simpleMove };
+})();
+if (typeof module !== 'undefined') module.exports = GoAI;
+
+// ===== Automatic problem generator (seeded, verified by the engine) =====
+const GoGen = (() => {
+  const E = (typeof Go !== 'undefined') ? Go : require('./engine.js');
+  function rng(seed) { // mulberry32
+    let a = seed >>> 0;
+    return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  }
+  const TYPES = {
+    libs: { name: '數氣', topic: 'capture' },
+    take: { name: '提子', topic: 'capture' },
+    atari: { name: '叫吃', topic: 'capture' },
+    escape: { name: '逃跑', topic: 'capture' },
+    double: { name: '雙叫吃', topic: 'capture' },
+    chase: { name: '吃子（征子、枷）', topic: 'tesuji' },
+    connect: { name: '補斷點', topic: 'capture' },
+    status: { name: '死活判斷（選擇題）', topic: 'life' },
+    vital: { name: '做活與殺棋', topic: 'life' },
+    count: { name: '數目（選擇題）', topic: 'big' }
+  };
+  const toRows = (n, g) => { const rows = []; for (let r = 0; r < n; r++) { let s = ''; for (let c = 0; c < n; c++) s += '.XO'[g[r * n + c]]; rows.push(s); } return rows; };
+  const rc = (n, i) => [Math.floor(i / n), i % n];
+  const shuffle = (R, a) => { for (let i = a.length - 1; i > 0; i--) { const j = (R() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const pick = (R, a) => a[(R() * a.length) | 0];
+
+  function allGroups(n, g) {
+    const seen = new Set(), out = [];
+    for (let i = 0; i < n * n; i++) if (g[i] && !seen.has(i)) { const gr = E.group(n, g, i); gr.stones.forEach(s => seen.add(s)); out.push(gr); }
+    return out;
+  }
+  const healthy = (n, g, minLibs, except) => allGroups(n, g).every(gr => (except && gr.stones.includes(except)) || gr.libs.size >= minLibs);
+  function growGroup(R, n, g, col, size, start) {
+    const stones = [start]; g[start] = col;
+    while (stones.length < size) {
+      const cand = [];
+      for (const s of stones) for (const j of E.nb(n, s)) if (g[j] === 0 && !cand.includes(j)) cand.push(j);
+      if (!cand.length) break;
+      const j = pick(R, cand); g[j] = col; stones.push(j);
+    }
+    return stones;
+  }
+  function sprinkle(R, n, g, count, avoid) { // distractor stones away from the action
+    for (let k = 0; k < count * 4 && count > 0; k++) {
+      const i = (R() * n * n) | 0;
+      if (g[i] || avoid.has(i)) continue;
+      g[i] = R() < 0.5 ? 1 : 2;
+      if (!healthy(n, g, 2)) { g[i] = 0; continue; }
+      count--;
+    }
+  }
+  const near = (n, stones, d) => { const s = new Set(); for (const x of stones) { const [r, c] = rc(n, x); for (let i = 0; i < n * n; i++) { const [r2, c2] = rc(n, i); if (Math.abs(r - r2) + Math.abs(c - c2) <= d) s.add(i); } } return s; };
+
+  // ---------- individual generators: return a problem or null ----------
+  function genLibs(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const col = R() < 0.6 ? 1 : 2, opp = 3 - col;
+    const start = (R() * n * n) | 0;
+    const stones = growGroup(R, n, g, col, level === 1 ? 1 + ((R() * 2) | 0) : 2 + ((R() * 3) | 0), start);
+    let libs = [...E.group(n, g, start).libs];
+    shuffle(R, libs);
+    const take = Math.min(libs.length - 1, (R() * (level === 1 ? 2 : 4)) | 0);
+    for (let k = 0; k < take; k++) { g[libs[k]] = opp; if (!healthy(n, g, 1)) g[libs[k]] = 0; }
+    if (level > 1) sprinkle(R, n, g, 3, near(n, stones, 2));
+    if (!healthy(n, g, 1)) return null;
+    const gr = E.group(n, g, start), ans = gr.libs.size;
+    if (allGroups(n, g).filter(x => x.color === col && x.stones.length === gr.stones.length).length > 1 && level === 1) return null;
+    const opts = [...new Set([ans, Math.max(1, ans - 1), ans + 1, ans + 2])].slice(0, 3).sort((a, b) => a - b);
+    const marks = {}; marks[rc(n, start).join(',')] = 'tri';
+    const libMarks = {}; gr.libs.forEach(i => { libMarks[rc(n, i).join(',')] = 'dot'; });
+    const who = col === 1 ? '黑' : '白';
+    return { type: 'choice', rows: toRows(n, g), marks, q: `△ 所在的這塊${who}棋有幾口氣？`, options: opts.map(x => x + ' 口'), answer: opts.indexOf(ans),
+      hint: `只數上下左右的空點，斜角不算；連在一起的${who}子要一起數。`, explain: `綠點就是這塊棋的氣，一共 ${ans} 口。${take ? '被對方佔掉的點不算氣。' : ''}`, explainMarks: libMarks };
+  }
+  function genTake(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const start = (R() * n * n) | 0;
+    const stones = growGroup(R, n, g, 2, level === 1 ? 1 + ((R() * 2) | 0) : 1 + ((R() * 4) | 0), start);
+    const libs = shuffle(R, [...E.group(n, g, start).libs]);
+    if (libs.length < 2) return null;
+    const keep = libs[0];
+    for (const l of libs.slice(1)) g[l] = 1;
+    if (level > 1) sprinkle(R, n, g, 4, near(n, stones, 2));
+    if (!healthy(n, g, 2, start)) return null;
+    if (E.group(n, g, start).libs.size !== 1) return null;
+    const r = E.play(n, g, keep, 1, -1); if (!r.ok || r.g[start] !== 0) return null;
+    return { type: 'move', rows: toRows(n, g), q: '黑先，找出可以提子的位置。', answers: [rc(n, keep)],
+      hint: '先找出只剩一口氣的白棋，再找那最後一口氣。', explain: `這塊白棋只剩這一口氣，黑棋堵住就提掉 ${stones.length} 顆。` };
+  }
+  function genAtari(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const start = (R() * n * n) | 0;
+    const stones = growGroup(R, n, g, 2, level === 1 ? 1 : 1 + ((R() * 3) | 0), start);
+    const libs = shuffle(R, [...E.group(n, g, start).libs]);
+    if (libs.length < 3) return null;
+    for (const l of libs.slice(2)) g[l] = 1;
+    if (level > 1) sprinkle(R, n, g, 4, near(n, stones, 2));
+    if (!healthy(n, g, 2)) return null;
+    const answers = [], traps = [];
+    for (const m of E.group(n, g, start).libs) {
+      const r = E.play(n, g, m, 1, -1); if (!r.ok) continue;
+      const mine = E.group(n, r.g, m).libs.size;
+      if (E.group(n, r.g, start).libs.size === 1 && mine >= 2) answers.push(rc(n, m)); else traps.push(rc(n, m));
+    }
+    if (!answers.length) return null;
+    return { type: 'move', rows: toRows(n, g), q: '黑先，請叫吃 △ 這塊白棋。', marks: { [rc(n, start).join(',')]: 'tri' }, answers, trap: traps[0],
+      hint: '叫吃就是讓對方只剩一口氣。下完也要看看自己還有幾口氣。', explain: '叫吃之後白棋只剩一口氣，下一手就能提掉。',
+      trapNote: '這樣叫吃，自己反而只剩一口氣，會先被白棋提掉。' };
+  }
+  function genEscape(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const start = (R() * n * n) | 0;
+    const stones = growGroup(R, n, g, 1, level === 1 ? 1 : 1 + ((R() * 3) | 0), start);
+    const libs = shuffle(R, [...E.group(n, g, start).libs]);
+    if (libs.length < 2) return null;
+    for (const l of libs.slice(1)) g[l] = 2;
+    // sometimes surround further around the escape point to make it harder
+    if (level > 1) { const ex = E.nb(n, libs[0]).filter(j => g[j] === 0); shuffle(R, ex); if (ex.length && R() < 0.6) g[ex[0]] = 2; sprinkle(R, n, g, 3, near(n, stones, 2)); }
+    if (!healthy(n, g, 1)) return null;
+    if (E.group(n, g, start).libs.size !== 1) return null;
+    if (allGroups(n, g).some(gr => gr.color === 1 && !gr.stones.includes(start) && gr.libs.size < 2)) return null;
+    const answers = [], losing = [];
+    for (let m = 0; m < n * n; m++) {
+      const r = E.play(n, g, m, 1, -1); if (!r.ok) continue;
+      const safe = r.g[start] !== 0 && !E.attackerWins(n, r.g, start, 24, r.ko);
+      if (safe) answers.push(rc(n, m)); else if (near(n, stones, 2).has(m)) losing.push(m);
+    }
+    if (!answers.length || answers.length > 3) return null;
+    const extend = libs[0], trapI = answers.some(a => a[0] * n + a[1] === extend) ? null : extend;
+    const capEsc = answers.some(([r, c]) => E.play(n, g, r * n + c, 1, -1).captured.length > 0);
+    return { type: 'escape', rows: toRows(n, g), target: rc(n, start), q: '黑棋 △ 被叫吃了，請救出它。', marks: { [rc(n, start).join(',')]: 'tri' }, answers, trap: trapI != null ? rc(n, trapI) : null,
+      hint: capEsc ? '旁邊有沒有白子自己也只剩一口氣？' : '往外長出去之後，要能有三口以上的氣。', explain: capEsc ? '吃掉叫吃你的白子，黑棋就脫困了。' : '逃出去之後氣夠多，白棋追不到了。',
+      trapNote: '這樣逃，白棋還能繼續叫吃，最後把黑棋提掉。' };
+  }
+  function genDouble(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const P = (R() * n * n) | 0; const nbP = shuffle(R, E.nb(n, P).slice());
+    if (nbP.length < 3) return null;
+    const A = nbP[0], B = nbP[1];
+    g[A] = 2; g[B] = 2;
+    for (const W of [A, B]) {
+      const others = shuffle(R, E.nb(n, W).filter(j => j !== P && g[j] === 0));
+      if (!others.length) return null;
+      for (const o of others.slice(1)) g[o] = 1;
+    }
+    if (level > 1) sprinkle(R, n, g, 4, near(n, [P, A, B], 2));
+    if (!healthy(n, g, 2)) return null;
+    const answers = [];
+    for (let m = 0; m < n * n; m++) {
+      const r = E.play(n, g, m, 1, -1); if (!r.ok || r.captured.length) continue;
+      if (E.group(n, r.g, m).libs.size < 2) continue;
+      const at = allGroups(n, r.g).filter(x => x.color === 2 && x.libs.size === 1);
+      if (at.length >= 2 && new Set(at.map(x => [...x.libs][0])).size >= 2) answers.push(rc(n, m));
+    }
+    if (!answers.length || answers.length > 2) return null;
+    return { type: 'move', rows: toRows(n, g), q: '黑先，找出一手同時叫吃兩顆白子的位置。', answers,
+      hint: '找兩顆白子共同的那一口氣。', explain: '兩顆白子同時被叫吃，白棋只能救一邊，另一邊一定被提掉。' };
+  }
+  function genChase(R, level) {
+    const n = 9, g = new Array(n * n).fill(0);
+    const r0 = 2 + ((R() * 5) | 0), c0 = 2 + ((R() * 5) | 0), start = r0 * n + c0;
+    g[start] = 2;
+    const libs = shuffle(R, [...E.group(n, g, start).libs]);
+    g[libs[0]] = 1; g[libs[1]] = 1;
+    const extra = 1 + ((R() * 3) | 0);
+    for (let k = 0; k < extra; k++) { const i = (R() * n * n) | 0; if (!g[i]) g[i] = R() < 0.65 ? 1 : 2; }
+    if (!healthy(n, g, 2)) return null;
+    if (E.group(n, g, start).libs.size !== 2) return null;
+    const wins = [];
+    for (let m = 0; m < n * n; m++) { const r = E.play(n, g, m, 1, -1); if (r.ok && (r.g[start] === 0 || E.defenderLoses(n, r.g, start, 24, r.ko))) wins.push(m); }
+    if (!wins.length || wins.length > 2) return null;
+    // white to move first must be able to escape, otherwise there is nothing to solve
+    const d = E.bestDefense(n, g, start, -1); if (!d || !d.escaped) return null;
+    const lib2 = [...E.group(n, g, start).libs];
+    const isNet = !wins.some(w => lib2.includes(w));
+    if (level === 1 && isNet) return null;
+    const trapM = lib2.find(m => !wins.includes(m));
+    return { type: 'capture', rows: toRows(n, g), target: rc(n, start), key: rc(n, wins[0]), trap: trapM != null ? rc(n, trapM) : null,
+      q: isNet ? '黑先，吃掉白子 △。直接叫吃好像不行喔。' : '黑先，想辦法吃掉白子 △。', hint: isNet ? '試試不叫吃，在白子逃跑的出口上罩住它（枷）。' : '想好叫吃的方向，把白子往自己的子或邊上趕。',
+      explain: isNet ? '用枷罩住，白棋怎麼逃都逃不掉。' : '叫吃方向正確，一路追到把白子提掉。', trapNote: '往這個方向叫吃，白棋逃出去之後氣會變多，追不到。' };
+  }
+  // ---------- connecting: white threatens to cut and capture ----------
+  function blackSafe(n, g, ko) { // after white's move, can black save every group?
+    for (const gr of allGroups(n, g)) if (gr.color === 1 && gr.libs.size <= 2 && E.defenderLoses(n, g, gr.stones[0], 16, ko)) return false;
+    return true;
+  }
+  function threats(n, g, ko) { // white moves (next to black) after which a black group dies
+    const blk = allGroups(n, g).filter(x => x.color === 1), cand = new Set(), out = [];
+    for (const gr of blk) for (const s of gr.stones) for (const j of E.nb(n, s)) if (!g[j]) cand.add(j);
+    for (const w of cand) { const r = E.play(n, g, w, 2, ko); if (r.ok && (r.captured.length || !blackSafe(n, r.g, r.ko))) out.push(w); }
+    return out;
+  }
+  const threatens = (n, g, ko) => threats(n, g, ko).length ? 1 : -1;
+  function genConnect(R, level) {
+    const n = 7, g = new Array(n * n).fill(0);
+    const r0 = 1 + ((R() * 4) | 0), c0 = 1 + ((R() * 4) | 0);
+    const pats = [[[0, 0], [1, 1]], [[0, 0], [0, 2]], [[0, 0], [1, 1], [1, 2]], [[0, 0], [0, 1], [1, 2]]];
+    const pat = pick(R, pats);
+    const blacks = pat.map(([a, b]) => (r0 + a) * n + c0 + b).filter(i => i < n * n && (i % n) >= c0);
+    if (blacks.length !== pat.length || pat.some(([a, b]) => r0 + a >= n || c0 + b >= n)) return null;
+    blacks.forEach(i => { g[i] = 1; });
+    const ring = [...near(n, blacks, 2)].filter(i => !g[i]); shuffle(R, ring);
+    const wN = level === 1 ? 2 + ((R() * 2) | 0) : 3 + ((R() * 3) | 0);
+    for (const i of ring.slice(0, wN)) g[i] = 2;
+    if (level > 1) sprinkle(R, n, g, 2, near(n, blacks, 2));
+    if (!healthy(n, g, 2)) return null;
+    const T = threats(n, g, -1); if (!T.length) return null;
+    const answers = [], cand = new Set();
+    for (const b of blacks) for (const j of near(n, [b], 2)) if (!g[j]) cand.add(j);
+    const nBlack = allGroups(n, g).filter(x => x.color === 1).length;
+    for (const m of cand) {
+      // only "real" connecting moves: on white's cutting point, or joining black groups
+      const joins = (() => { const r = E.play(n, g, m, 1, -1); return r.ok && allGroups(n, r.g).filter(x => x.color === 1).length < nBlack; })();
+      if (!T.includes(m) && !joins) continue;
+      const r = E.play(n, g, m, 1, -1); if (!r.ok || E.group(n, r.g, m).libs.size < 2) continue;
+      if (threatens(n, r.g, r.ko) < 0) answers.push(rc(n, m));
+    }
+    if (!answers.length || answers.length > 2) return null;
+    const trap = [...cand].find(m => !answers.some(([a, b]) => a * n + b === m) && E.play(n, g, m, 1, -1).ok);
+    return { type: 'move', rows: toRows(n, g), q: '黑先，白棋準備切斷黑棋。請補好最要緊的那一點。', answers, trap: trap != null ? rc(n, trap) : null,
+      hint: '先想想：白棋下在哪裡，會讓黑棋被分開、而且有一邊被吃？那裡就是黑棋要先補的地方。', explain: '補好這一點，白棋就切不斷，黑棋所有的子都安全了。',
+      trapNote: '這一手沒有補到要害，白棋一切斷，黑棋就有子會被吃。' };
+  }
+  // ---------- eye shapes: status (choice) and vital point (solve) ----------
+  const SHAPE_NAMES = { '0,0|0,1|0,2': '直三', '0,0|0,1|1,1': '彎三', '0,0|0,1|0,2|1,1': '丁四', '0,0|0,1|0,2|1,0|1,1': '刀把五', '0,1|1,0|1,1|1,2|2,1': '梅花五',
+    '0,1|1,0|1,1|1,2|2,1|2,2': '葡萄六', '0,0|0,1|0,2|0,3': '直四', '0,0|0,1|0,2|1,2': '曲四', '0,0|0,1|1,0|1,1': '方四', '0,0|0,1|0,2|1,0|1,1|1,2': '板六',
+    '0,0|0,1|0,2|0,3|0,4': '直五', '0,0|0,1|0,2|1,0|1,2': '彎五（ㄇ字形）' };
+  const T8 = [(r, c) => [r, c], (r, c) => [c, -r], (r, c) => [-r, -c], (r, c) => [-c, r], (r, c) => [r, -c], (r, c) => [-c, -r], (r, c) => [-r, c], (r, c) => [c, r]];
+  function shapeName(cells) {
+    for (const t of T8) {
+      const pts = cells.map(([r, c]) => t(r, c)); const mr = Math.min(...pts.map(p => p[0])), mc = Math.min(...pts.map(p => p[1]));
+      const k = pts.map(([r, c]) => [r - mr, c - mc]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(p => p.join(',')).join('|');
+      if (SHAPE_NAMES[k]) return SHAPE_NAMES[k];
+    }
+    return null;
+  }
+  function eyePosition(R, level) {
+    const n = 9, size = level === 1 ? 3 + ((R() * 2) | 0) : 3 + ((R() * 4) | 0);
+    const where = pick(R, level === 1 ? ['corner', 'edge', 'center'] : ['corner', 'edge', 'edge', 'corner']);
+    // grow a compact eye space inside a 3x4 box
+    const box = { h: 2 + ((R() * 2) | 0), w: 3 + ((R() * 2) | 0) };
+    const r0 = where === 'center' ? 3 : n - box.h, c0 = where === 'corner' ? 0 : where === 'edge' ? 2 + ((R() * 2) | 0) : 2 + ((R() * 2) | 0);
+    const inBox = i => { const [r, c] = rc(n, i); return r >= r0 && r < r0 + box.h && c >= c0 && c < c0 + box.w; };
+    const start = (r0 + ((R() * box.h) | 0)) * n + c0 + ((R() * box.w) | 0); const eye = [start];
+    while (eye.length < size) {
+      const cand = []; for (const s of eye) for (const j of E.nb(n, s)) if (inBox(j) && !eye.includes(j) && !cand.includes(j)) cand.push(j);
+      if (!cand.length) break; eye.push(pick(R, cand));
+    }
+    if (eye.length < 3) return null;
+    const inner = R() < 0.5 ? 1 : 2, outer = 3 - inner, g = new Array(n * n).fill(0);
+    const pts = eye.map(i => rc(n, i));
+    for (let i = 0; i < n * n; i++) {
+      const [r, c] = rc(n, i), d = Math.min(...pts.map(([a, b]) => Math.max(Math.abs(a - r), Math.abs(b - c))));
+      if (d === 1) g[i] = inner; else if (d === 2) g[i] = outer;
+    }
+    const tgt = E.nb(n, eye[0]).map(j => j).find(j => g[j] === inner) ?? eye.flatMap(e => E.nb(n, e)).find(j => g[j] === inner);
+    if (tgt == null) return null;
+    const grp = E.group(n, g, tgt);
+    if (grp.libs.size !== eye.length) return null; // inner group must be one block whose only liberties are the eye
+    if (allGroups(n, g).filter(x => x.color === inner).length !== 1) return null;
+    if (allGroups(n, g).some(x => x.color === outer && x.libs.size < 2)) return null;
+    const all = grp.stones.concat(eye), rs = all.map(i => Math.floor(i / n)), cs = all.map(i => i % n);
+    const bx = [Math.min(...rs), Math.min(...cs), Math.max(...rs), Math.max(...cs)];
+    const region = []; for (let r = bx[0]; r <= bx[2]; r++) for (let c = bx[1]; c <= bx[3]; c++) region.push(r * n + c);
+    const p = { attacker: outer, region, target: tgt, own: -1 };
+    const atkFirst = E.localOutcome(n, g, outer, p, -1), defFirst = E.localOutcome(n, g, inner, p, -1);
+    return { n, g, eye, inner, outer, tgt, bx, p, where, name: shapeName(pts), status: !atkFirst ? 'alive' : defFirst ? 'dead' : 'unsettled' };
+  }
+  const WHERE = { corner: '角上', edge: '邊上', center: '中央' };
+  function genStatus(R, level) {
+    const P = eyePosition(R, level); if (!P) return null;
+    const { n, g, inner, eye, status, name } = P;
+    if (status === 'unsettled' && R() < 0.35) return null; // keep a balanced mix
+    const who = inner === 1 ? '黑' : '白', foe = inner === 1 ? '白' : '黑';
+    const opts = ['活棋：不用補也活', '死棋：先下也活不了', '要看誰先下'];
+    const ans = { alive: 0, dead: 1, unsettled: 2 }[status];
+    const shape = name ? `「${name}」` : `${eye.length} 個空點的眼形`;
+    const explain = status === 'alive' ? `${who}棋圍住的是${shape}，${foe}棋先下也破不掉，已經是活棋。` : status === 'dead' ? `${who}棋圍住的是${shape}，就算${who}棋先下也做不出兩個眼。` : `${who}棋圍住的是${shape}。${who}棋先下佔住要點就活，${foe}棋先下點中要點就死。`;
+    const first = status === 'dead' ? inner : P.outer;
+    const mk = {}; mk[rc(n, P.tgt).join(',')] = 'tri';
+    return { type: 'choice', rows: toRows(n, g), marks: mk, q: `△ 這塊${who}棋在${WHERE[P.where]}，它是活棋、死棋，還是要看誰先下？`, options: opts, answer: ans,
+      hint: '數一數裡面的空點，想想對方點進要害之後，還能不能分成兩個眼。', explain,
+      demo: { box: P.bx, attacker: P.outer, target: rc(n, P.tgt), first } };
+  }
+  function genVital(R, level) {
+    const P = eyePosition(R, level); if (!P || P.status !== 'unsettled') return null;
+    const { n, g, inner } = P, goal = inner === 1 ? 'live' : 'kill';
+    const good = [];
+    for (const m of P.eye) { const r = E.play(n, g, m, 1, -1); if (!r.ok) continue; const v = E.localOutcome(n, r.g, 2, P.p, r.ko); if (goal === 'live' ? !v : v || r.g[P.tgt] === 0) good.push(m); }
+    if (!good.length || good.length > 2) return null;
+    const trap = P.eye.find(m => !good.includes(m) && E.play(n, g, m, 1, -1).ok);
+    const shape = P.name ? `「${P.name}」` : '這個眼形';
+    return { type: 'solve', goal, rows: toRows(n, g), target: rc(n, P.tgt), box: P.bx, key: rc(n, good[0]), trap: trap != null ? rc(n, trap) : null,
+      q: goal === 'live' ? `黑先，黑棋圍住的是${shape}。請讓黑棋活。` : `黑先，白棋圍住的是${shape}。請殺掉白棋。`,
+      hint: '眼形的要害通常是「碰到最多空點」的那一點。', explain: goal === 'live' ? '佔住要害，黑棋就能分成兩個眼。' : '點中要害，白棋就分不出兩個眼。',
+      trapNote: goal === 'live' ? '沒佔到要害，白棋點進去之後黑棋只剩一個眼。' : '沒點中要害，白棋補一手就活了。' };
+  }
+  // ---------- counting territory (choice) ----------
+  function genCount(R, level) {
+    const n = level === 1 ? 7 : 9, g = new Array(n * n).fill(0);
+    const lo = Math.floor(n / 2) - 1, hi = Math.floor(n / 2) + 2;
+    const h = [lo + ((R() * (hi - lo)) | 0)];
+    for (let c = 1; c < n; c++) h.push(Math.max(lo, Math.min(hi, h[c - 1] + ((R() * 3) | 0) - 1)));
+    for (let c = 0; c < n; c++) { g[(h[c] - 1) * n + c] = 1; g[h[c] * n + c] = 2; }
+    // a few stones inside one's own area (they are not territory)
+    const extra = level === 1 ? (R() * 2) | 0 : 1 + ((R() * 3) | 0);
+    for (let k = 0; k < extra * 3 && k < 20; k++) { const c = (R() * n) | 0, top = R() < 0.5; const r = top ? (R() * (h[c] - 1)) | 0 : h[c] + 1 + ((R() * (n - h[c] - 1)) | 0); if (r >= 0 && r < n && !g[r * n + c] && (top ? r < h[c] - 1 : r > h[c])) g[r * n + c] = top ? 1 : 2; }
+    const sc = E.score(n, g); let bt = 0, wt = 0; const own = {};
+    for (let i = 0; i < n * n; i++) if (!g[i]) { if (sc.own[i] === 1) { bt++; own[rc(n, i).join(',')] = 'dot'; } else if (sc.own[i] === 2) wt++; }
+    if (bt + wt !== g.filter(v => !v).length || bt < 3 || wt < 3) return null;
+    if (level === 1) {
+      const opts = [...new Set([bt, bt + 1, bt - 1, bt + 2].filter(x => x > 0))].slice(0, 3).sort((a, b) => a - b);
+      return { type: 'choice', rows: toRows(n, g), q: '對局結束了。黑棋圍了幾目？（只數黑棋圍住的空點）', options: opts.map(x => x + ' 目'), answer: opts.indexOf(bt),
+        hint: '棋子本身不算目，只數被黑棋圍住、白棋進不去的空點。', explain: `綠點就是黑棋的地，一共 ${bt} 目。`, explainMarks: own };
+    }
+    const d = bt - wt; const txt = x => x === 0 ? '一樣多' : x > 0 ? `黑棋多 ${x} 目` : `白棋多 ${-x} 目`;
+    const opts = [...new Set([d, d + 2, d - 2, -d].map(txt))].slice(0, 3);
+    const idx = Array.from({ length: opts.length }, (_, k) => k); shuffle(R, idx);
+    const sh = idx.map(k => opts[k]);
+    return { type: 'choice', rows: toRows(n, g), q: '對局結束了（不算貼目）。黑白雙方的地，誰比較多？多幾目？', options: sh, answer: sh.indexOf(txt(d)),
+      hint: '分別數出黑棋、白棋圍住的空點，再相減。棋子本身不算目。', explain: `黑棋 ${bt} 目（綠點），白棋 ${wt} 目，所以${txt(d)}。`, explainMarks: own };
+  }
+  const MAKERS = { libs: genLibs, take: genTake, atari: genAtari, escape: genEscape, double: genDouble, chase: genChase, connect: genConnect, status: genStatus, vital: genVital, count: genCount };
+  function make(type, level, seed) {
+    const R = rng(seed * 2654435761 + level * 97 + type.length * 131);
+    for (let k = 0; k < 400; k++) {
+      const p = MAKERS[type](R, level);
+      if (p) return Object.assign(p, { id: `g:${type}:${level}:${seed}`, generated: true, genType: type, topic: TYPES[type].topic, level, lessonTitle: TYPES[type].name });
+    }
+    return null;
+  }
+  return { TYPES, make, rng, toRows };
+})();
+if (typeof module !== 'undefined') module.exports = GoGen;
+
+</script>

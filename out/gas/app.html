@@ -1,0 +1,901 @@
+<script>
+// ===== App UI =====
+(() => {
+  const $ = (s, el = document) => el.querySelector(s);
+  const key = (r, c) => r + ',' + c;
+  const CHEERS = ['好棋！', '漂亮！', '就是這一手！', '完全正確！', '厲害！', '看得很準！'];
+  const cheer = () => CHEERS[(Math.random() * CHEERS.length) | 0];
+  const BANK = buildBank();
+  // classic collections (decoded from the compact build-time data)
+  const CLS = {
+    ggg: { name: '精選題', full: 'Go Game Guru 每週一題', set: { easy: '簡單', intermediate: '中級', hard: '困難' } },
+    gzp: { name: '官子譜', full: '《官子譜》（明・過百齡 著，清・陶式玉 編注）' }
+  };
+  const CLV = ['', '一星', '二星', '三星'];
+  function decodeClassic(p) {
+    const A = 'abcdefghijklmnopqrstuvwxyz', n = p.n, rows = [];
+    for (let r = 0; r < n; r++) rows.push(new Array(n).fill('.'));
+    const put = (s, ch) => { for (let k = 0; k < s.length; k += 2) rows[A.indexOf(s[k + 1])][A.indexOf(s[k])] = ch; };
+    put(p.b, 'X'); put(p.w, 'O');
+    let i = 0; const t = p.t;
+    const node = () => {
+      const nd = { m: [A.indexOf(t[i + 1]), A.indexOf(t[i])], ok: false, kids: [] }; i += 2; if (t[i] === '!') { nd.ok = true; i++; }
+      if (t[i] === '#') { const j = t.indexOf(';', i); nd.note = +t.slice(i + 1, j); i = j + 1; }
+      if (t[i] === '@') { i++; nd.lb = {}; while (t[i] !== ';') { nd.lb[A.indexOf(t[i + 2]) + ',' + A.indexOf(t[i + 1])] = t[i]; i += 3; } i++; }
+      nd.kids = list(); return nd;
+    };
+    const list = () => { const out = []; if (i >= t.length || t[i] === ')') return out; if (t[i] === '(') { while (t[i] === '(') { i++; out.push(node()); i++; } return out; } out.push(node()); return out; };
+    const tree = list();
+    const [R, C] = p.at, stars = [];
+    for (const a of [3, 9, 15]) for (const b of [3, 9, 15]) if (a >= R && a < R + n && b >= C && b < C + n) stars.push([a - R, b - C]);
+    const src = CLS[p.src], gzp = p.src === 'gzp';
+    const title = gzp ? `${src.name} 第 ${p.no} 題` : `${src.name}・${src.set[p.set]} 第 ${p.no} 題`;
+    return { id: 'c:' + p.id, type: 'tree', classic: p.src, level: p.lv, rows: rows.map(r => r.join('')), tree, stars,
+      cut: [R > 0, C + n < 19, R + n < 19, C > 0].map(Number), topic: 'classic', topicName: '經典題庫', lessonTitle: title,
+      q: gzp ? '黑先。（古譜原為白先，這裡把黑白對調，一律由黑棋先下。）' : '黑先。',
+      hint: '先找出最危險的那塊棋，再找讓對方應不過來的一手。',
+      explain: gzp ? '這就是古譜記載的正解。' : '這就是正解。',
+      offTree: gzp ? '這不是古譜記載的下法。古譜每題只記一條正解，其他下法也可能成立，但這裡以原書為準。' : '這一手不在解答裡，通常是因為對方有更好的應手。' };
+  }
+  const CLASSIC = (typeof CLASSIC_RAW !== 'undefined' ? CLASSIC_RAW : []).map(decodeClassic);
+
+  // ---------------- progress store (local + Google account) ----------------
+  const STORE = 'weiqi-state-v2';
+  const blank = () => ({ v: 2, updated: 0, lessons: {}, bank: { solved: {}, wrong: {}, streak: 0, best: 0, daily: null }, pos: { li: 0, ei: 0 } });
+  let S = blank();
+  try {
+    const raw = localStorage.getItem(STORE);
+    if (raw) S = Object.assign(blank(), JSON.parse(raw));
+    else { const old = JSON.parse(localStorage.getItem('weiqi-progress-v1') || 'null'); if (old) S.lessons = old; }
+  } catch (e) {}
+  const hasCloud = typeof google !== 'undefined' && google.script && google.script.run;
+  let syncState = hasCloud ? 'loading' : 'local', saveTimer = null;
+  function merge(a, b) { // combine two saved states without losing progress
+    const out = blank();
+    const newer = (a.updated || 0) >= (b.updated || 0) ? a : b, older = newer === a ? b : a;
+    for (const src of [a, b]) for (const id in (src.lessons || {})) out.lessons[id] = [...new Set([...(out.lessons[id] || []), ...src.lessons[id]])];
+    out.bank.solved = Object.assign({}, older.bank && older.bank.solved, newer.bank && newer.bank.solved);
+    out.bank.wrong = Object.assign({}, (newer.bank && newer.bank.wrong) || {});
+    out.bank.streak = (newer.bank && newer.bank.streak) || 0;
+    out.bank.best = Math.max((a.bank && a.bank.best) || 0, (b.bank && b.bank.best) || 0);
+    out.bank.daily = (newer.bank && newer.bank.daily) || null;
+    out.bank.genSolved = Math.max((a.bank && a.bank.genSolved) || 0, (b.bank && b.bank.genSolved) || 0);
+    out.pos = newer.pos || out.pos; out.updated = Math.max(a.updated || 0, b.updated || 0);
+    return out;
+  }
+  function save() {
+    S.updated = Date.now();
+    try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) {}
+    if (!hasCloud) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      syncState = 'saving'; renderSync();
+      google.script.run.withSuccessHandler(() => { syncState = 'synced'; renderSync(); })
+        .withFailureHandler(() => { syncState = 'offline'; renderSync(); }).saveProgress(JSON.stringify(S));
+    }, 1200);
+  }
+  function renderSync() {
+    const el = $('#sync'); if (!el) return;
+    const txt = { local: '進度存在這台裝置', loading: '正在讀取雲端進度…', saving: '同步中…', synced: '已同步到 Google 帳號', offline: '雲端暫時無法連線，先存在這台裝置' }[syncState];
+    el.textContent = txt; el.dataset.state = syncState;
+  }
+  if (hasCloud) {
+    google.script.run.withSuccessHandler(raw => {
+      try { if (raw) S = merge(S, JSON.parse(raw)); } catch (e) {}
+      syncState = 'synced'; renderSync(); save(); refreshAll();
+    }).withFailureHandler(() => { syncState = 'offline'; renderSync(); }).loadProgress();
+  }
+
+  // ---------------- board drawing ----------------
+  function starPoints(n) {
+    if (n === 9) return [[2, 2], [2, 6], [6, 2], [6, 6], [4, 4]];
+    if (n === 13) return [[3, 3], [3, 9], [9, 3], [9, 9], [6, 6]];
+    if (n === 19) return [[3, 3], [3, 9], [3, 15], [9, 3], [9, 9], [9, 15], [15, 3], [15, 9], [15, 15]];
+    if (n === 7) return [[3, 3]];
+    return [];
+  }
+  let gradId = 0;
+  function boardSVG(n, g, o = {}) {
+    const cs = 40, m = 26, W = m * 2 + cs * (n - 1), p = i => m + i * cs, gid = 'g' + (++gradId);
+    const marks = o.marks || {}, nums = o.nums || {}, interactive = !!o.interactive, own = o.own;
+    let s = `<svg class="board" viewBox="0 0 ${W} ${W}" role="img" aria-label="${n} 路棋盤">`;
+    s += `<defs><radialGradient id="${gid}b" cx="35%" cy="30%" r="70%"><stop offset="0" stop-color="#5a5a5a"/><stop offset="1" stop-color="#0d0d0d"/></radialGradient>
+      <radialGradient id="${gid}w" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d6d2c6"/></radialGradient></defs>`;
+    s += `<rect x="0" y="0" width="${W}" height="${W}" rx="10" fill="var(--wood)" stroke="var(--wood-edge)" stroke-width="2"/>`;
+    const cut = o.cut || [0, 0, 0, 0]; // top, right, bottom, left: 1 = the board continues past this side
+    const ext = m - 4;
+    for (let i = 0; i < n; i++) {
+      const wr = (i === 0 && !cut[0]) || (i === n - 1 && !cut[2]) ? 1.8 : 1, wc = (i === 0 && !cut[3]) || (i === n - 1 && !cut[1]) ? 1.8 : 1;
+      s += `<line x1="${p(0) - (cut[3] ? ext : 0)}" y1="${p(i)}" x2="${p(n - 1) + (cut[1] ? ext : 0)}" y2="${p(i)}" stroke="var(--wood-line)" stroke-width="${wr}"/>`;
+      s += `<line x1="${p(i)}" y1="${p(0) - (cut[0] ? ext : 0)}" x2="${p(i)}" y2="${p(n - 1) + (cut[2] ? ext : 0)}" stroke="var(--wood-line)" stroke-width="${wc}"/>`;
+    }
+    for (const [r, c] of (o.stars || starPoints(n))) s += `<circle cx="${p(c)}" cy="${p(r)}" r="${n > 13 ? 3 : 3.6}" fill="var(--wood-line)"/>`;
+    const R = 18.4;
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+      const i = r * n + c, v = g[i], x = p(c), y = p(r), k = key(r, c), mk = marks[k];
+      const dead = o.dead && o.dead.has(i);
+      if (v) {
+        const cls = o.newStone === i ? ' class="new"' : '';
+        s += `<circle${cls} cx="${x}" cy="${y}" r="${R}" fill="url(#${gid}${v === 1 ? 'b' : 'w'})" ${v === 2 ? 'stroke="#9a958a" stroke-width="0.8"' : ''} ${dead ? 'opacity=".45"' : ''}/>`;
+        const ink = v === 1 ? '#f2f2f2' : '#1a1a1a';
+        if (nums[k]) s += `<text x="${x}" y="${y + 5.5}" text-anchor="middle" font-size="${nums[k] > 9 ? 14 : 16}" font-weight="700" font-family="var(--f-body)" fill="${ink}">${nums[k]}</text>`;
+        else if (mk === 'tri') s += `<path d="M${x} ${y - 9} L${x + 8} ${y + 6} L${x - 8} ${y + 6} Z" fill="none" stroke="${v === 1 ? '#f2f2f2' : '#c0392b'}" stroke-width="2"/>`;
+        else if (o.last === i) s += `<circle cx="${x}" cy="${y}" r="5" fill="${ink}"/>`;
+      }
+      if (own && (!v || dead)) {
+        const ov = own[i];
+        if (Math.abs(ov) > 0.2) s += `<rect x="${x - 8}" y="${y - 8}" width="16" height="16" rx="2" fill="${ov > 0 ? '#111' : '#fff'}" stroke="${ov > 0 ? 'none' : '#777'}" stroke-width=".8" opacity="${Math.min(0.95, Math.abs(ov) * 1.05).toFixed(2)}"/>`;
+      }
+      if (!v && mk) {
+        if (mk === 'dot') s += `<circle cx="${x}" cy="${y}" r="7" fill="var(--accent)" opacity=".85"/>`;
+        else if (mk === 'x') s += `<path d="M${x - 9} ${y - 9} L${x + 9} ${y + 9} M${x + 9} ${y - 9} L${x - 9} ${y + 9}" stroke="#c0392b" stroke-width="3.2" stroke-linecap="round"/>`;
+        else if (mk === 'hint') s += `<circle cx="${x}" cy="${y}" r="15" fill="none" stroke="var(--accent)" stroke-width="3.5" stroke-dasharray="5 4"/>`;
+        else s += `<rect x="${x - 13}" y="${y - 13}" width="26" height="26" rx="4" fill="var(--wood)"/><text x="${x}" y="${y + 6.5}" text-anchor="middle" font-size="${mk.length > 1 ? 13 : 18}" font-weight="900" font-family="var(--f-display)" fill="#8b2a1c">${mk}</text>`;
+      }
+      if (interactive && (!v || o.clickStones)) {
+        s += `<circle class="hit" data-i="${i}" cx="${x}" cy="${y}" r="19" fill="transparent"/>`;
+        if (!v) s += `<circle class="ghost" cx="${x}" cy="${y}" r="17" fill="${o.turn === 2 ? '#fff' : '#000'}" opacity="0" pointer-events="none"/>`;
+      }
+    }
+    return s + '</svg>';
+  }
+
+  // ---------------- exercise logic shared by lessons and the bank ----------------
+  function regionOf(e, n) {
+    const reg = []; const b = e.box;
+    for (let r = b[0]; r <= b[2]; r++) for (let c = b[1]; c <= b[3]; c++) reg.push(r * n + c);
+    return { attacker: e.goal === 'live' ? 2 : 1, region: reg, target: e.target[0] * n + e.target[1], own: e.goal === 'semeai' ? e.own[0] * n + e.own[1] : -1 };
+  }
+  // is black's move i correct for a solve/capture problem?
+  function judge(e, n, g, ko, i) {
+    const r = Go.play(n, g, i, 1, ko);
+    if (!r.ok) return { ok: false, illegal: r.reason };
+    if (e.type === 'capture') {
+      const t = e.target[0] * n + e.target[1];
+      return { ok: true, res: r, good: r.g[t] === 0 || Go.defenderLoses(n, r.g, t, 24, r.ko), done: r.g[t] === 0 };
+    }
+    if (e.type === 'escape') {
+      const t = e.target[0] * n + e.target[1];
+      return { ok: true, res: r, good: r.g[t] !== 0 && !Go.attackerWins(n, r.g, t, 24, r.ko), done: false };
+    }
+    const p = regionOf(e, n);
+    if (!p.region.includes(i)) return { ok: true, res: r, good: false, outside: true };
+    if (r.g[p.target] === 0 && e.goal !== 'live') return { ok: true, res: r, good: true, done: true };
+    const atk = Go.localOutcome(n, r.g, 2, p, r.ko);
+    return { ok: true, res: r, good: e.goal === 'live' ? !atk : atk, done: false };
+  }
+  function whiteReply(e, n, g, ko) {
+    if (e.type === 'capture') {
+      const t = e.target[0] * n + e.target[1];
+      const d = Go.bestDefense(n, g, t, ko);
+      return d ? { move: d.move, res: d.res, good: d.escaped } : { move: -1 };
+    }
+    if (e.type === 'escape') { // white attacks the black stones
+      const t = e.target[0] * n + e.target[1], gr = Go.group(n, g, t); if (!gr) return { move: -1 };
+      let fb = null;
+      for (const m of gr.libs) {
+        const r = Go.play(n, g, m, 2, ko); if (!r.ok) continue;
+        if (r.g[t] === 0 || Go.defenderLoses(n, r.g, t, 24, r.ko)) return { move: m, res: r, good: true };
+        fb = fb || { move: m, res: r, good: false };
+      }
+      return fb || { move: -1 };
+    }
+    const p = regionOf(e, n);
+    return Go.localReply(n, g, 2, p, ko);
+  }
+  function blackBest(e, n, g, ko) {
+    if (e.type === 'capture') {
+      const t = e.target[0] * n + e.target[1], gr = Go.group(n, g, t);
+      if (!gr) return null;
+      for (const m of gr.libs) { const j = judge(e, n, g, ko, m); if (j.ok && j.good) return { move: m, res: j.res }; }
+      return null;
+    }
+    if (e.type === 'escape') { const t = e.target[0] * n + e.target[1]; if (!g[t]) return null; const d = Go.bestDefense(n, g, t, ko); return d ? { move: d.move, res: d.res } : null; }
+    const p = regionOf(e, n);
+    const r = Go.localReply(n, g, 1, p, ko);
+    return r && r.move >= 0 ? r : null;
+  }
+  // build a numbered line for the review player
+  function buildLine(e, first, maxK) {
+    const { n, g } = Go.parse(e.rows); let cur = g, ko = -1;
+    const tCol = e.target ? g[e.target[0] * n + e.target[1]] : 2, tName = tCol === 1 ? '黑棋' : '白棋';
+    const steps = [{ g: cur, nums: {}, text: '題目的起始局面。' }];
+    const t = e.target ? e.target[0] * n + e.target[1] : -1;
+    let nums = {}, color = 1, move = first, passed = false;
+    for (let k = 1; k <= (maxK || 30); k++) {
+      let r;
+      if (k === 1) { r = Go.play(n, cur, move, 1, ko); if (!r.ok) break; }
+      else if (color === 2) {
+        const w = whiteReply(e, n, cur, ko);
+        if (!w || w.move < 0) {
+          if (passed) { steps.push({ g: cur, nums: Object.assign({}, nums), text: '雙方都沒有需要再下的地方了。' }); break; }
+          passed = true; steps.push({ g: cur, nums: Object.assign({}, nums), text: '白棋已經沒有好的應手，只能放棄這塊。' }); ko = -1; color = 1; k--; continue;
+        }
+        move = w.move; r = w.res;
+      }
+      else { const b = blackBest(e, n, cur, ko); if (!b) break; move = b.move; r = b.res; passed = false; }
+      for (const s of r.captured) delete nums[key(Math.floor(s / n), s % n)];
+      nums = Object.assign({}, nums, { [key(Math.floor(move / n), move % n)]: k });
+      const who = color === 1 ? '黑' : '白';
+      let text = `<b>${who} ${k}</b>：${describeMove(n, cur, r, move, color)}`;
+      if (!r.captured.length && t >= 0 && r.g[t]) {
+        const l = Go.group(n, r.g, t).libs.size;
+        text += `目標的${tName}現在有 ${l} 口氣${l === 1 ? '（被叫吃）' : ''}。`;
+      }
+      cur = r.g; ko = r.ko;
+      steps.push({ g: cur, nums: Object.assign({}, nums), last: move, text });
+      if (t >= 0 && cur[t] === 0) break;
+      color = 3 - color;
+    }
+    return { n, steps };
+  }
+
+  function moveText(n, before, res, i) {
+    if (res.captured.length) return `黑 1：提掉 ${res.captured.length} 顆白子。`;
+    const mine = Go.group(n, res.g, i).libs.size;
+    const seen = new Set(); let ataris = 0;
+    for (let j = 0; j < n * n; j++) if (res.g[j] === 2 && !seen.has(j)) { const gr = Go.group(n, res.g, j); gr.stones.forEach(x => seen.add(x)); if (gr.libs.size === 1) ataris++; }
+    let t = `黑 1：這塊黑棋有 ${mine} 口氣。`;
+    if (ataris >= 2) t += `同時叫吃 ${ataris} 塊白棋。`; else if (ataris === 1) t += '白棋被叫吃了。';
+    if (mine === 1) t += '自己只剩一口氣，很危險。';
+    return t;
+  }
+  // a solver line for life & death choice questions; `first` is the side that moves first
+  function demoLine(e) {
+    const { n, g } = Go.parse(e.rows), D = e.demo;
+    const reg = []; for (let r = D.box[0]; r <= D.box[2]; r++) for (let c = D.box[1]; c <= D.box[3]; c++) reg.push(r * n + c);
+    const p = { attacker: D.attacker, region: reg, target: D.target[0] * n + D.target[1], own: -1 };
+    let cur = g, ko = -1, col = D.first, nums = {};
+    const steps = [{ g, nums: {}, text: `${col === 1 ? '黑' : '白'}棋先下，看看會怎麼發展。` }];
+    for (let k = 1; k <= 12; k++) {
+      const r = Go.localReply(n, cur, col, p, ko);
+      if (!r || r.move < 0) { steps.push({ g: cur, nums: Object.assign({}, nums), text: `${col === 1 ? '黑' : '白'}棋已經沒有有用的下法。` }); break; }
+      for (const s of r.res.captured) delete nums[key(Math.floor(s / n), s % n)];
+      nums = Object.assign({}, nums, { [key(Math.floor(r.move / n), r.move % n)]: k });
+      cur = r.res.g; ko = r.res.ko;
+      steps.push({ g: cur, nums: Object.assign({}, nums), last: r.move, text: `${col === 1 ? '黑' : '白'} ${k}${r.res.captured.length ? `：提掉 ${r.res.captured.length} 顆子。` : '。'}` });
+      if (cur[p.target] === 0) break;
+      col = 3 - col;
+    }
+    return { name: '過程示範', kind: 'right', summary: e.explain, steps };
+  }
+
+  // ---------------- move-by-move commentary ----------------
+  function regionOwner(n, g, i) { // empty area containing i: which colour surrounds it (0 = both / none)
+    const seen = new Set([i]), q = [i], touch = new Set();
+    for (let k = 0; k < q.length && q.length < 30; k++) for (const j of Go.nb(n, q[k])) { if (!g[j] && !seen.has(j)) { seen.add(j); q.push(j); } else if (g[j]) touch.add(g[j]); }
+    return q.length >= 30 || touch.size !== 1 ? 0 : [...touch][0];
+  }
+  function describeMove(n, before, r, i, col) {
+    const who = col === 1 ? '黑' : '白', foe = col === 1 ? '白' : '黑', out = [];
+    const nbs = Go.nb(n, i), seenMine = new Set(), seenFoe = new Set();
+    let mineBefore = 0, foeBefore = 0;
+    for (const j of nbs) {
+      if (before[j] === col && !seenMine.has(j)) { mineBefore++; Go.group(n, before, j).stones.forEach(x => seenMine.add(x)); }
+      if (before[j] === 3 - col && !seenFoe.has(j)) { foeBefore++; Go.group(n, before, j).stones.forEach(x => seenFoe.add(x)); }
+    }
+    const owner = regionOwner(n, before, i);
+    if (r.captured.length) out.push(`提掉 ${r.captured.length} 顆${foe}子`);
+    if (r.ko >= 0) out.push('形成打劫，對方不能馬上提回來');
+    const ataris = [], seen = new Set();
+    for (const j of nbs) if (r.g[j] === 3 - col && !seen.has(j)) { const gr = Go.group(n, r.g, j); gr.stones.forEach(x => seen.add(x)); if (gr.libs.size === 1) ataris.push(gr.stones.length); }
+    if (ataris.length >= 2) out.push('同時叫吃兩塊棋（雙叫吃）');
+    else if (ataris.length === 1 && !r.captured.length) out.push(`叫吃${ataris[0] > 1 ? ` ${ataris[0]} 顆` : ''}${foe}子`);
+    const me = Go.group(n, r.g, i);
+    if (me.libs.size === 1 && !r.captured.length && r.ko < 0) out.push(owner === 3 - col ? `點進${foe}棋的眼位，故意送吃（撲），讓${foe}棋只能做出假眼或少一口氣` : '自己只剩一口氣，這是故意送給對方吃的棄子');
+    else if (owner === 3 - col && !r.captured.length) out.push(`點進${foe}棋的眼位裡，破壞${foe}棋做眼`);
+    else if (owner === col) out.push(`在自己的眼位裡下一手，鞏固眼形`);
+    if (mineBefore >= 2) out.push('把自己分開的棋連在一起');
+    if (foeBefore >= 2 && !r.captured.length) { const left = new Set(); for (const j of nbs) if (r.g[j] === 3 - col) left.add(Go.group(n, r.g, j).stones[0]); const ids = [...left].map(x => Go.group(n, r.g, x).stones.sort((a, b) => a - b)[0]); if (new Set(ids).size >= 2) out.push(`把${foe}棋分斷`); }
+    if (!ataris.length && !r.captured.length) {
+      let low = null; const s2 = new Set();
+      for (const j of nbs) if (r.g[j] === 3 - col && !s2.has(j)) { const gr = Go.group(n, r.g, j); gr.stones.forEach(x => s2.add(x)); if (gr.libs.size <= 3 && (!low || gr.libs.size < low)) low = gr.libs.size; }
+      if (low) out.push(`緊住${foe}棋的氣，那塊剩 ${low} 口氣`);
+    }
+    if (!out.length || (me.libs.size <= 3 && me.libs.size > 1 && out.length < 2)) out.push(`這塊${who}棋現在有 ${me.libs.size} 口氣`);
+    return out.join('，') + '。';
+  }
+  const noteText = nd => (nd && nd.note != null && typeof CLASSIC_NOTES !== 'undefined' && CLASSIC_NOTES[nd.note]) ? CLASSIC_NOTES[nd.note].replace(/\n+/g, ' ') : '';
+
+  // ---------------- move-tree problems (classic collections) ----------------
+  const hasOk = nd => nd.ok || nd.kids.some(hasOk);
+  function treeLine(e, pickFirst) { // follow a branch of the tree for the review player
+    const { n, g } = Go.parse(e.rows); let cur = g, ko = -1, col = 1, nums = {}, list = e.tree, k = 0;
+    const steps = [{ g, nums: {}, text: '題目的起始局面。' }];
+    let nd = pickFirst(list);
+    while (nd && k < 40) {
+      k++; const i = nd.m[0] * n + nd.m[1], r = Go.play(n, cur, i, col, ko); if (!r.ok) break;
+      for (const s of r.captured) delete nums[key(Math.floor(s / n), s % n)];
+      nums = Object.assign({}, nums, { [key(nd.m[0], nd.m[1])]: k });
+      const before = cur;
+      const note = noteText(nd);
+      steps.push({ g: r.g, nums: Object.assign({}, nums), last: i, marks: nd.lb || {}, text: `<b>${col === 1 ? '黑' : '白'} ${k}</b>：${describeMove(n, before, r, i, col)}${note ? `<span class="note">原作者講解：${note}</span>` : ''}${nd.ok ? '<br>到這裡就成功了。' : ''}` });
+      cur = r.g; ko = r.ko;
+      col = 3 - col; nd = nd.kids.find(hasOk) || nd.kids[0];
+    }
+    return { n, steps };
+  }
+  function openTreeReview(e) {
+    const lines = [];
+    const R = treeLine(e, l => l.find(hasOk));
+    lines.push({ name: '正解', kind: 'right', summary: e.explain, n: R.n, steps: R.steps });
+    const bads = e.tree.filter(nd => !hasOk(nd)).slice(0, 3);
+    bads.forEach((bad, k) => { const W = treeLine(e, () => bad); lines.push({ name: bads.length > 1 ? `錯誤 ${k + 1}` : '常見錯誤', kind: 'wrong', summary: '這一手看起來可行，但對方有好的應手。', n: W.n, steps: W.steps }); });
+    const alts = e.tree.filter(nd => hasOk(nd)).slice(1, 3);
+    alts.forEach((alt, k) => { const A2 = treeLine(e, () => alt); lines.push({ name: `另解 ${k + 1}`, kind: 'right', summary: '這也是正確的下法。', n: A2.n, steps: A2.steps }); });
+    return lines;
+  }
+
+  function makePractice(root, ctx) {
+    const P = { root, ctx, e: null };
+    P.start = (e) => {
+      P.e = e; P.status = 'play'; P.msg = null; P.marks = {}; P.ko = -1; P.last = -1; P.picked = null; P.mistake = false; P.review = null;
+      if (e.rows) { const b = Go.parse(e.rows); P.n = b.n; P.g = b.g; }
+      P.tnodes = e.tree || null; P.col = 1;
+      P.render();
+    };
+    const setMsg = (kind, title, text) => { P.msg = { kind, title, text }; };
+    const solved = () => { P.status = 'right'; ctx.onResult(P.e, !P.mistake); };
+    const missed = () => { if (!P.mistake) { P.mistake = true; ctx.onMiss && ctx.onMiss(P.e); } };
+    P.render = () => {
+      const e = P.e;
+      if (P.review) return renderReview();
+      let marks = Object.assign({}, e.marks || {}, P.marks);
+      if (e.target && P.g[e.target[0] * P.n + e.target[1]]) marks[key(e.target[0], e.target[1])] = 'tri';
+      const interactive = e.type !== 'choice' && P.status === 'play';
+      let h = ctx.header ? ctx.header() : '';
+      h += `<p class="q">${e.q}</p>`;
+      if (P.g) h += boardSVG(P.n, P.g, { marks, interactive, last: P.last, newStone: P.last, cut: e.cut, stars: e.stars });
+      if (e.type === 'choice') h += `<div class="options">${e.options.map((o, k) => `<button data-opt="${k}" class="${P.picked === k ? (k === e.answer ? 'right' : 'wrong') : ''}" ${P.status === 'right' ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
+      if (P.msg) h += `<div class="feedback ${P.msg.kind}"><strong>${P.msg.title}</strong>${P.msg.text}</div>`;
+      else h += `<div class="feedback"><strong>提示</strong>${e.type === 'choice' ? '選一個答案。' : e.type === 'move' ? '點棋盤上的交叉點下子。' : '點棋盤下子，對方會自動應對。'}${P.hintLevel ? '<br>' + e.hint : ''}</div>`;
+      const canReview = ['solve', 'capture', 'move', 'escape', 'tree'].includes(e.type) || !!(e.explainMarks || e.demo);
+      h += `<div class="actions"><div class="grp"><button class="btn" data-act="retry">重來</button>${canReview ? `<button class="btn" data-act="review">看解析</button>` : ''}</div>${ctx.next ? ctx.next(P.status === 'right') : ''}</div>`;
+      if (ctx.footer) h += ctx.footer();
+      root.innerHTML = h;
+    };
+    function renderReview() {
+      const R = P.review, st = R.lines[R.li].steps[R.si], n = R.lines[R.li].n;
+      let h = ctx.header ? ctx.header() : '';
+      h += `<p class="q">解析：${P.e.q}</p>`;
+      if (R.lines.length > 1) h += `<div class="seg" role="tablist">${R.lines.map((l, k) => `<button data-line="${k}" aria-selected="${k === R.li}">${l.name}</button>`).join('')}</div>`;
+      h += boardSVG(n, st.g, { nums: st.nums, last: st.last, marks: st.marks || {}, cut: P.e.cut, stars: P.e.stars });
+      const lastStep = R.si === R.lines[R.li].steps.length - 1;
+      h += `<div class="feedback ${R.lines[R.li].kind}"><strong>第 ${R.si} / ${R.lines[R.li].steps.length - 1} 步</strong>${st.text}${lastStep ? `<br>${R.lines[R.li].summary}` : ''}</div>`;
+      h += `<div class="actions"><div class="grp"><button class="btn" data-act="prev" ${R.si === 0 ? 'disabled' : ''}>← 上一步</button><button class="btn primary" data-act="nextstep" ${lastStep ? 'disabled' : ''}>下一步 →</button></div><button class="btn" data-act="close">回到題目</button></div>`;
+      root.innerHTML = h;
+    }
+    function openReview() {
+      const e = P.e, n = P.n, lines = [];
+      if (e.type === 'tree') lines.push(...openTreeReview(e));
+      else if (e.type === 'choice') {
+        const { g } = Go.parse(e.rows);
+        if (e.explainMarks) lines.push({ name: '解析', kind: 'right', summary: e.explain, steps: [{ g, nums: {}, marks: Object.assign({}, e.marks || {}, e.explainMarks), text: '圖中標出的點就是答案的依據。' }] });
+        if (e.demo) lines.push(demoLine(e));
+      } else if (e.type === 'move') {
+        const { g } = Go.parse(e.rows); const [r, c] = e.answers[0]; const i = r * n + c; const res = Go.play(n, g, i, 1, -1);
+        lines.push({ name: '正解', kind: 'right', summary: e.explain, steps: [{ g, nums: {}, text: '題目的起始局面。' }, { g: res.g, nums: { [key(r, c)]: 1 }, last: i, text: moveText(n, g, res, i) }] });
+        if (e.answers.length > 1) { const mk = {}; e.answers.slice(1).forEach(([a, b]) => { if (!res.g[a * n + b]) mk[key(a, b)] = 'dot'; }); lines[0].steps[1].marks = mk; if (Object.keys(mk).length) lines[0].summary += '綠點的位置也是正解。'; }
+        if (e.trap) {
+          const ti = e.trap[0] * n + e.trap[1], tr = Go.play(n, g, ti, 1, -1);
+          if (tr.ok) {
+            const steps = [{ g, nums: {}, text: '題目的起始局面。' }, { g: tr.g, nums: { [key(e.trap[0], e.trap[1])]: 1 }, last: ti, text: moveText(n, g, tr, ti) }];
+            const my = Go.group(n, tr.g, ti);
+            if (my && my.libs.size === 1) { const cap = [...my.libs][0], w = Go.play(n, tr.g, cap, 2, tr.ko); if (w.ok) steps.push({ g: w.g, nums: { [key(Math.floor(cap / n), cap % n)]: 2 }, last: cap, text: `白 2：提掉 ${w.captured.length} 顆黑子。` }); }
+            lines.push({ name: '常見錯誤', kind: 'wrong', summary: e.trapNote || '', steps });
+          }
+        }
+      } else {
+        const { g } = Go.parse(e.rows);
+        let first = e.key ? e.key[0] * n + e.key[1] : -1;
+        if (first < 0) for (let i = 0; i < n * n; i++) { const j = judge(e, n, g, -1, i); if (j.ok && j.good) { first = i; break; } }
+        const L = buildLine(e, first, e.type === 'escape' ? 3 : 0); lines.push({ name: '正解', kind: 'right', summary: e.explain, n: L.n, steps: L.steps });
+        if (e.trap) { const T = buildLine(e, e.trap[0] * n + e.trap[1]); lines.push({ name: '常見錯誤', kind: 'wrong', summary: e.trapNote || '', n: T.n, steps: T.steps }); }
+      }
+      lines.forEach(l => { l.n = l.n || n; });
+      P.review = { lines, li: 0, si: 0 };
+      P.render();
+    }
+    function onPoint(i) {
+      const e = P.e, n = P.n, r = Math.floor(i / n), c = i % n;
+      if (e.type === 'move') {
+        const hit = a => a && a.some(([ar, ac]) => ar === r && ac === c);
+        if (hit(e.answers) || hit(e.alt)) {
+          const res = Go.play(n, P.g, i, 1, -1);
+          P.g = res.g; P.last = i; P.marks = {};
+          const capTxt = res.captured.length ? `（提掉 ${res.captured.length} 顆白子）` : '';
+          if (hit(e.answers)) setMsg('right', cheer(), e.explain + capTxt); else setMsg('right', '可以，但還有更好的', e.altMsg);
+          solved();
+        } else {
+          const res = Go.play(n, P.g, i, 1, -1);
+          P.marks = { [key(r, c)]: 'x' }; missed();
+          setMsg('wrong', '再想想', res.ok ? e.hint : (res.reason === 'suicide' ? '這裡下了自己會沒有氣，是禁著點。' : e.hint));
+        }
+        return P.render();
+      }
+      if (e.type === 'tree') return treePoint(i, r, c);
+      // capture / solve
+      const j = judge(e, n, P.g, P.ko, i);
+      if (!j.ok) { setMsg('wrong', '這裡不能下', j.illegal === 'ko' ? '劫剛被提，不能馬上提回。' : '這裡下了自己會沒有氣。'); return P.render(); }
+      if (j.outside) { P.marks = { [key(r, c)]: 'x' }; missed(); setMsg('wrong', '不是這裡', `關鍵在題目那一塊附近。${e.hint}`); return P.render(); }
+      P.g = j.res.g; P.ko = j.res.ko; P.last = i; P.marks = {};
+      if (j.done) { setMsg('right', cheer(), e.explain); solved(); return P.render(); }
+      if (e.type === 'escape' && j.good) {
+        const l = Go.group(n, P.g, e.target[0] * n + e.target[1]).libs.size;
+        setMsg('right', cheer(), `${e.explain}黑棋現在有 ${l} 口氣。`); solved(); return P.render();
+      }
+      if (e.type === 'solve' && j.good) {
+        const tail = e.goal === 'live' ? '白棋已經殺不死了。' : e.goal === 'semeai' ? '對殺已經是黑棋贏了。' : '白棋已經活不了。';
+        setMsg('right', cheer(), `${e.explain}${tail}想看完整過程，按「看解析」。`); solved(); return P.render();
+      }
+      const w = whiteReply(e, n, P.g, P.ko);
+      if (!w || w.move < 0) {
+        if (j.good) { setMsg('right', cheer(), e.explain + '白棋已經無計可施。'); solved(); }
+        else { setMsg('wrong', '再想想', e.hint); missed(); }
+        return P.render();
+      }
+      P.g = w.res.g; P.ko = w.res.ko; P.last = w.move;
+      if (!j.good) {
+        missed(); P.status = 'fail';
+        const why = e.type === 'escape' ? '白棋繼續追，黑棋逃不掉了。' : e.goal === 'live' ? '白棋這樣下，黑棋就做不出兩個眼了。' : e.type === 'capture' ? '白棋這樣逃，已經追不到了。' : '白棋這樣應，就吃不掉了。';
+        setMsg('wrong', '白棋化解了', `${why}${e.hint} 按「重來」再試，或按「看解析」。`);
+      } else {
+        const t = e.target[0] * n + e.target[1];
+        if (P.g[t] === 0) { setMsg('right', cheer(), e.explain); solved(); }
+        else { const l = Go.group(n, P.g, t).libs.size; setMsg('', '繼續', `白棋應了一手，白棋那塊現在有 ${l} 口氣。輪到你。`); }
+      }
+      P.render();
+    }
+    function treePoint(i, r, c) {
+      const e = P.e, n = P.n;
+      const nd = P.tnodes.find(k => k.m[0] === r && k.m[1] === c);
+      const res = Go.play(n, P.g, i, 1, P.ko);
+      if (!res.ok) { setMsg('wrong', '這裡不能下', res.reason === 'ko' ? '劫剛被提，不能馬上提回。' : '這裡下了自己會沒有氣。'); return P.render(); }
+      if (!nd) {
+        P.marks = { [key(r, c)]: 'x' }; missed();
+        setMsg('wrong', '不是這一手', e.offTree + '想不出來可以按「看解析」。');
+        return P.render();
+      }
+      const myTxt = '你這手' + describeMove(n, P.g, res, i, 1);
+      P.g = res.g; P.ko = res.ko; P.last = i; P.marks = Object.assign({}, nd.lb || {});
+      const nNote = noteText(nd);
+      if (nd.ok) { setMsg('right', cheer(), `${myTxt}${e.explain}${nNote ? `<span class="note">原作者講解：${nNote}</span>` : ''}`); solved(); return P.render(); }
+      const good = hasOk(nd);
+      const replies = good ? nd.kids.filter(hasOk) : nd.kids;
+      const w = replies.length ? replies[(Math.random() * replies.length) | 0] : null;
+      let wTxt = '';
+      if (w) { const wi = w.m[0] * n + w.m[1], wr = Go.play(n, P.g, wi, 2, P.ko); if (wr.ok) { wTxt = '對方應' + describeMove(n, P.g, wr, wi, 2); P.g = wr.g; P.ko = wr.ko; P.last = wi; Object.assign(P.marks, w.lb || {}); } }
+      const notes = [nNote, noteText(w)].filter(Boolean).map(t => `<span class="note">原作者講解：${t}</span>`).join('');
+      if (!good) { missed(); P.status = 'fail'; setMsg('wrong', '對方化解了', `${myTxt}${wTxt}這樣下，對方有好的應手。${notes}按「重來」再試，或按「看解析」。`); return P.render(); }
+      if (w && w.ok) { setMsg('right', cheer(), `${myTxt}${wTxt}${e.explain}${notes}`); solved(); return P.render(); }
+      P.tnodes = w ? w.kids : [];
+      if (!P.tnodes.length) { setMsg('right', cheer(), `${myTxt}${e.explain}${notes}`); solved(); return P.render(); }
+      setMsg('', '繼續', `${myTxt}${wTxt}輪到你。${notes}`);
+      P.render();
+    }
+    root.addEventListener('click', ev => {
+      const t = ev.target;
+      if (P.review) {
+        const R = P.review;
+        if (t.closest('[data-act="prev"]')) { R.si = Math.max(0, R.si - 1); return P.render(); }
+        if (t.closest('[data-act="nextstep"]')) { R.si = Math.min(R.lines[R.li].steps.length - 1, R.si + 1); return P.render(); }
+        const ln = t.closest('[data-line]'); if (ln) { R.li = +ln.dataset.line; R.si = 0; return P.render(); }
+        if (t.closest('[data-act="close"]')) { P.review = null; return P.render(); }
+        if (ctx.click) ctx.click(t);
+        return;
+      }
+      const hit = t.closest('.hit'); if (hit) return onPoint(+hit.dataset.i);
+      const opt = t.closest('button[data-opt]');
+      if (opt && P.status !== 'right') {
+        const k = +opt.dataset.opt; P.picked = k;
+        if (k === P.e.answer) { setMsg('right', cheer(), P.e.explain); solved(); } else { missed(); setMsg('wrong', '再想想', P.e.hint); }
+        return P.render();
+      }
+      if (t.closest('[data-act="retry"]')) return P.start(P.e);
+      if (t.closest('[data-act="review"]')) return openReview();
+      if (ctx.click) ctx.click(t);
+    });
+    return P;
+  }
+
+  // ---------------- lessons view ----------------
+  const lessonDone = l => (S.lessons[l.id] || []).length >= l.exercises.length;
+  let LP = null;
+  function renderRail() {
+    const head = {}; CURRICULUM.forEach(c => { head[c.ids[0]] = c.name; });
+    $('#rail').innerHTML = LESSONS.map((l, i) => `${head[l.id] ? `<li class="rail-h" aria-hidden="true">${head[l.id]}</li>` : ''}<li><button data-li="${i}" class="${lessonDone(l) ? 'done' : ''}" aria-current="${i === S.pos.li}">
+      <span class="num">${i + 1}</span><span class="t">${l.title}</span><span class="lv">${l.level}</span></button></li>`).join('');
+    const cl = LESSONS[S.pos.li];
+    $('#railToggle').innerHTML = `<span>第 ${S.pos.li + 1} 課　${cl.title}</span><span aria-hidden="true">▾</span>`;
+    const d = LESSONS.filter(lessonDone).length;
+    $('#meterText').textContent = `課程 ${d} / ${LESSONS.length}`;
+    $('#meterBar').style.width = (d / LESSONS.length * 100) + '%';
+  }
+  function figureHTML(f) {
+    const { n, g } = Go.parse(f.rows); const nums = {}; const gg = g.slice();
+    if (f.seq) f.seq.forEach(([r, c], k) => { gg[r * n + c] = k % 2 === 0 ? 1 : 2; nums[key(r, c)] = k + 1; });
+    return `<figure>${boardSVG(n, gg, { marks: f.marks || {}, nums })}<figcaption>${f.caption}</figcaption></figure>`;
+  }
+  function refsHTML(l) {
+    if (!l.refs || !l.refs.length) return '';
+    return `<div class="refs"><strong>本課參考</strong><ul>${l.refs.map(r => { const src = SOURCES[r.s]; return src ? `<li><a href="${src.url}" target="_blank" rel="noopener">${src.title}</a>：${r.note}</li>` : ''; }).join('')}</ul>
+      參考資料只用來決定主題範圍與教學順序；本課文字、圖例與題目為本站自行撰寫，題目答案經程式驗算。</div>`;
+  }
+  function renderRes() {
+    const el = $('#view-res'); if (el.dataset.done) return; el.dataset.done = '1';
+    const title = id => (LESSONS.find(l => l.id === id) || {}).title || id;
+    const used = {}; LESSONS.forEach(l => (l.refs || []).forEach(r => { (used[r.s] = used[r.s] || []).push(l.title); }));
+    const ext = [
+      ['https://online-go.com/', 'OGS（Online Go Server）', '免費網頁對弈平台，可下 9、13、19 路，也能和電腦對下。'],
+      ['https://ai-sensei.com/', 'AI Sensei', '上傳自己的棋譜，由 AI 標出關鍵失誤，適合覆盤。'],
+      ['https://github.com/lightvector/KataGo', 'KataGo', '開源圍棋 AI，許多覆盤工具背後都是它，需要另外安裝。'],
+      ['https://senseis.xmp.net/?PagesForBeginners', 'Sensei’s Library 初學者專區', '英文圍棋維基，術語與格言幾乎都查得到。'],
+      ['https://forums.online-go.com/t/free-resources-for-beginners/6700', 'OGS 論壇：Free Resources for Beginners', '整理了大量免費教學、題庫與電子書的連結。'],
+      ['https://www.cna.com.tw/news/acn/202411080075.aspx', '中央社：林海峰入選日本圍棋殿堂', '旅日棋士林海峰的報導。']
+    ];
+    el.innerHTML = `<section class="res-intro">
+        <div class="eyebrow">參考資料與延伸學習</div>
+        <h2>這套課程是怎麼安排的</h2>
+        <p>十八課分成三級。三個級別的主題範圍，依照英國圍棋協會（BGA）初學者證書題目單第 1 到第 3 級劃分；每一級裡面的先後順序，參考《速成圍棋：入門篇》的章節安排與 The Way to Go 的講解順序；從 9 路開始、再到 13、19 路的做法，則參考 BGA 的教學指引與 Go Magic 的課程路線。</p>
+        <p class="note">課文、比喻、圖例、課程題目、固定題庫和無限練習，都是本站自行撰寫或由程式產生，答案經內建的規則引擎和死活求解程式驗算，沒有使用下列「參考來源」的題目或內文。題庫裡的「經典題庫」是唯一例外，題目來自下方列出的公開來源，並依各自的授權使用。每一課的最下方也會列出該課參考了哪些來源。</p>
+      </section>
+      <section><h3>課程對照表</h3><div class="tbl"><table class="curr"><thead><tr><th>級別</th><th>課程</th></tr></thead><tbody>
+        ${CURRICULUM.map(c => `<tr><td>${c.name}</td><td>${c.ids.map(title).join('、')}</td></tr>`).join('')}
+      </tbody></table></div></section>
+      <section><h3>參考來源</h3><ul class="links">
+        ${Object.entries(SOURCES).map(([k, src]) => `<li><a href="${src.url}" target="_blank" rel="noopener">${src.title}</a><span>${src.by}</span><span>取得方式：${src.access}</span><span>本站參考的部分：${src.use}${used[k] ? `（用於：${[...new Set(used[k])].join('、')}）` : ''}</span></li>`).join('')}
+      </ul></section>
+      <section><h3>經典題庫的來源與授權</h3><ul class="links">
+        <li><a href="https://github.com/gogameguru/go-problems" target="_blank" rel="noopener">Go Game Guru：Weekly Go Problems</a><span>An Younggil（職業八段）、David Ormerod 編寫，簡單、中級、困難各 140 題，附完整的正解與失敗變化。</span><span>授權：<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hant" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a>（姓名標示、非商業性、相同方式分享）。</span><span>本站的改作：裁切盤面、轉成互動題、依原作「簡單／中級／困難」標成一到三星；原作者的英文講解由本站翻譯成中文，標示為「原作者講解」。這些改作部分同樣以 CC BY-NC-SA 4.0 提供，限非商業用途。</span></li>
+        <li><a href="https://www.u-go.net/classic/" target="_blank" rel="noopener">《官子譜》</a><span>明代過百齡原著、清代陶式玉編注的古典棋譜，屬公有領域。</span><span>資料：SGF 由 Flygo 整理、Ulrich Goertz 在 u-go.net 發布並註明可轉載；本站使用 <a href="https://github.com/tasuki/tsumego" target="_blank" rel="noopener">tasuki/tsumego</a> 收錄的版本與其去除重複後的 1107 題編號。原 SGF 沒有附講解。</span><span>本站的改作：原書多為白先，這裡把黑白對調成黑先；依正解手數分成一到三星（1～3 手、4～7 手、8 手以上）。全書屬有段者程度，一星也不簡單。每一手的說明是程式依盤面自動產生的，不是原書內容。</span></li>
+      </ul><p class="sub">《玄玄棋經》目前沒有找到附答案、而且授權清楚的公開資料，所以暫未收錄。</p></section>
+      <section><h3>延伸學習</h3><ul class="links">
+        ${ext.map(([u, t, d]) => `<li><a href="${u}" target="_blank" rel="noopener">${t}</a><span>${d}</span></li>`).join('')}
+      </ul><p class="sub">以上連結的內容版權屬於各自的作者或機構，本站只提供連結。</p></section>`;
+  }
+  let lessonPane = 'notes';
+  function setPane(p) {
+    lessonPane = p;
+    const el = $('#lesson'); el.classList.toggle('pane-notes', p === 'notes'); el.classList.toggle('pane-practice', p === 'practice');
+    el.querySelectorAll('[data-lpane]').forEach(b => b.setAttribute('aria-selected', b.dataset.lpane === p));
+  }
+  function renderLesson() {
+    const l = LESSONS[S.pos.li];
+    if (!l.exercises[S.pos.ei]) S.pos.ei = 0;
+    const exN = l.exercises[0].type === 'free' ? '' : ` ${l.exercises.length} 題`;
+    $('#lesson').innerHTML = `<div class="seg lesson-switch" role="tablist">
+        <button data-lpane="notes" aria-selected="true">課文</button><button data-lpane="practice" aria-selected="false">練習${exN}</button>
+      </div>
+      <section class="notes">
+        <div class="eyebrow">第 ${S.pos.li + 1} 課 · ${l.level}</div>
+        <h2>${l.title}</h2>
+        ${l.intro.map(p => `<p>${p}</p>`).join('')}
+        ${l.story ? `<aside class="story"><span>${l.story.label}</span>${l.story.text}${l.story.cite && SOURCES[l.story.cite] ? `<span class="cite">出處：<a href="${SOURCES[l.story.cite].url}" target="_blank" rel="noopener">${SOURCES[l.story.cite].title}</a></span>` : ''}</aside>` : ''}
+        <div class="figs">${(l.figures || []).map(figureHTML).join('')}</div>
+        ${refsHTML(l)}
+        <button class="btn primary wide mobile-only" data-lpane="practice">讀完了，開始練習 →</button>
+      </section>
+      <section class="practice" aria-live="polite" id="lessonPractice"></section>`;
+    renderRail(); setPane(lessonPane);
+    const box = $('#lessonPractice');
+    if (l.exercises[0].type === 'free') {
+      box.innerHTML = `<div class="practice-head"><span class="label">實戰</span></div><p class="q">準備好了嗎？到「對弈」和電腦下一盤吧。</p>
+        <div class="cta-board">${boardSVG(9, Go.parse(E9).g, { marks: { '2,6': 'hint' } })}</div>
+        <div class="actions"><span></span><button class="btn primary" data-go="play">開始對弈 →</button></div>`;
+      if (!lessonDone(l)) { S.lessons[l.id] = [0]; save(); renderRail(); }
+      return;
+    }
+    LP = makePractice(box, {
+      header: () => {
+        const done = S.lessons[l.id] || [];
+        return `<div class="practice-head"><span class="label">練習</span><div class="dots">${l.exercises.length > 1 ? l.exercises.map((_, k) => `<button data-ei="${k}" class="${done.includes(k) ? 'ok' : ''} ${k === S.pos.ei ? 'cur' : ''}" aria-label="第 ${k + 1} 題">${k + 1}</button>`).join('') : ''}</div></div>`;
+      },
+      onResult: (e, clean) => { const arr = S.lessons[l.id] || (S.lessons[l.id] = []); if (!arr.includes(S.pos.ei)) arr.push(S.pos.ei); if (clean) delete S.bank.wrong[l.id + '-' + S.pos.ei]; save(); renderRail(); },
+      onMiss: () => { if (BANK.some(b => b.id === l.id + '-' + S.pos.ei)) { S.bank.wrong[l.id + '-' + S.pos.ei] = Date.now(); save(); } },
+      next: (ok) => {
+        const last = S.pos.ei === l.exercises.length - 1, lastLesson = S.pos.li === LESSONS.length - 1;
+        const label = !last ? '下一題' : lastLesson ? '' : '下一課';
+        return label ? `<button class="btn ${ok ? 'primary' : ''}" data-act="next">${label} →</button>` : '';
+      },
+      click: (t) => {
+        const dot = t.closest('button[data-ei]'); if (dot) { S.pos.ei = +dot.dataset.ei; save(); LP.start(l.exercises[S.pos.ei]); return; }
+        if (t.closest('[data-act="next"]')) {
+          if (S.pos.ei < l.exercises.length - 1) { S.pos.ei++; save(); LP.start(l.exercises[S.pos.ei]); }
+          else if (S.pos.li < LESSONS.length - 1) { S.pos = { li: S.pos.li + 1, ei: 0 }; save(); lessonPane = 'notes'; renderLesson(); window.scrollTo({ top: 0 }); }
+        }
+      }
+    });
+    LP.start(l.exercises[S.pos.ei]);
+  }
+  const closeRail = () => { $('nav.rail').classList.remove('open'); $('#railToggle').setAttribute('aria-expanded', 'false'); };
+  $('#railToggle').addEventListener('click', () => { const r = $('nav.rail'); r.classList.toggle('open'); $('#railToggle').setAttribute('aria-expanded', r.classList.contains('open')); });
+  $('#rail').addEventListener('click', e => {
+    const b = e.target.closest('button[data-li]'); if (!b) return;
+    closeRail();
+    S.pos = { li: +b.dataset.li, ei: 0 }; save(); lessonPane = 'notes'; renderLesson(); window.scrollTo({ top: 0 });
+  });
+  $('#lesson').addEventListener('click', e => {
+    const b = e.target.closest('[data-lpane]'); if (!b) return;
+    setPane(b.dataset.lpane); $('#lesson').scrollIntoView({ block: 'start' });
+  });
+
+  // ---------------- bank view ----------------
+  const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); };
+  function dailyProblem() {
+    const t = todayStr(); let h = 0; for (const ch of t) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    const pool = BANK.filter(e => e.rows && e.type !== 'choice');
+    return pool[h % pool.length];
+  }
+  let bankFilter = { topic: 'all', mode: 'all', gen: null, glevel: 1, kind: 'move', csrc: 'all', clv: 1 }, BP = null, bankCur = null;
+  const isGen = id => id.startsWith('g:');
+  function getProblem(id) {
+    if (isGen(id)) { const [, type, lv, seed] = id.split(':'); return GoGen.TYPES[type] ? GoGen.make(type, +lv, +seed) : null; }
+    if (id.startsWith('c:')) return CLASSIC.find(e => e.id === id) || null;
+    return BANK.find(e => e.id === id) || null;
+  }
+  const kindOk = e => bankFilter.kind === 'all' || (bankFilter.kind === 'choice' ? e.type === 'choice' : e.type !== 'choice');
+  function classicPool() {
+    let pool = CLASSIC.filter(e => (bankFilter.csrc === 'all' || e.classic === bankFilter.csrc) && (!bankFilter.clv || e.level === bankFilter.clv));
+    const fresh = pool.filter(e => !S.bank.solved[e.id]);
+    return fresh.length ? fresh : pool;
+  }
+  function bankPool() {
+    if (bankFilter.mode === 'classic') return classicPool();
+    if (bankFilter.mode === 'wrong') return Object.keys(S.bank.wrong).map(getProblem).filter(Boolean).filter(kindOk);
+    let pool = BANK.filter(kindOk);
+    if (bankFilter.topic !== 'all') pool = pool.filter(e => e.topic === bankFilter.topic);
+    if (bankFilter.mode === 'new') pool = pool.filter(e => !S.bank.solved[e.id]);
+    return pool;
+  }
+  function renderBankSide() {
+    const B = S.bank, solvedN = Object.keys(B.solved).filter(k => !isGen(k) && !k.startsWith('c:')).length, wrongN = Object.keys(B.wrong).length;
+    const inCls = bankFilter.mode === 'classic', clsSolved = Object.keys(B.solved).filter(k => k.startsWith('c:')).length;
+    const clsCount = CLASSIC.filter(e => (bankFilter.csrc === 'all' || e.classic === bankFilter.csrc) && (!bankFilter.clv || e.level === bankFilter.clv)).length;
+    const daily = dailyProblem(), dailyDone = B.daily && B.daily.date === todayStr() && B.daily.done;
+    const inGen = bankFilter.mode === 'gen';
+    $('#bankSide').innerHTML = `
+      <div class="stats">
+        <div><b>${B.streak}</b><span>連續答對</span></div>
+        <div><b>${B.best}</b><span>最佳紀錄</span></div>
+        <div><b>${solvedN}<small>/${BANK.length}</small></b><span>題庫已解</span></div>
+      </div>
+      <button class="daily ${dailyDone ? 'done' : ''}" data-daily="1"><span class="eyebrow">今日一題</span><b>${daily.lessonTitle}</b><span>${dailyDone ? '今天已完成，明天再來' : '每天換一題，點這裡開始'}</span></button>
+      <div class="filter"><span class="label">無限練習（每次都是新題）</span><div class="chips">
+        ${Object.entries(GoGen.TYPES).map(([k, t]) => `<button data-gen="${k}" aria-pressed="${inGen && bankFilter.gen === k}">${t.name}${k === 'libs' ? '（選擇題）' : ''}</button>`).join('')}
+      </div><div class="chips">
+        <button data-glevel="1" aria-pressed="${bankFilter.glevel === 1}">簡單</button><button data-glevel="2" aria-pressed="${bankFilter.glevel === 2}">普通</button>
+      </div><p class="sub">已完成 ${B.genSolved || 0} 題自動出題。</p></div>
+      ${CLASSIC.length ? `<div class="filter"><span class="label">經典題庫（${CLASSIC.length} 題，已解 ${clsSolved} 題）</span><div class="chips">
+        <button data-csrc="all" aria-pressed="${inCls && bankFilter.csrc === 'all'}">全部</button>${Object.entries(CLS).map(([k, c]) => `<button data-csrc="${k}" aria-pressed="${inCls && bankFilter.csrc === k}">${c.name}</button>`).join('')}
+      </div><div class="chips">
+        ${[1, 2, 3].map(v => `<button data-clv="${v}" aria-pressed="${bankFilter.clv === v}">${'★'.repeat(v)}</button>`).join('')}<button data-clv="0" aria-pressed="${bankFilter.clv === 0}">不分難度</button>
+      </div><p class="sub">這個範圍共 ${clsCount} 題，會先出還沒解過的題目。精選題的 ★ 是原作者的「簡單／中級／困難」；《官子譜》全書是有段者程度，★ 依正解手數區分（1～3 手、4～7 手、8 手以上）。來源與授權見「資源」頁。</p></div>` : ''}
+      <div class="filter"><span class="label">固定題庫</span><div class="chips">
+        <button data-kind="move" aria-pressed="${bankFilter.kind === 'move'}">下子題</button><button data-kind="choice" aria-pressed="${bankFilter.kind === 'choice'}">選擇題</button><button data-kind="all" aria-pressed="${bankFilter.kind === 'all'}">全部題型</button>
+      </div><div class="chips">
+        ${[{ id: 'all', name: '全部' }].concat(BANK_TOPICS).map(t => `<button data-topic="${t.id}" aria-pressed="${!inGen && !inCls && bankFilter.topic === t.id}">${t.name}</button>`).join('')}
+      </div><div class="chips">
+        <button data-mode="all" aria-pressed="${bankFilter.mode === 'all'}">全部</button>
+        <button data-mode="new" aria-pressed="${bankFilter.mode === 'new'}">還沒解過</button>
+        <button data-mode="wrong" aria-pressed="${bankFilter.mode === 'wrong'}">錯題本 ${wrongN}</button>
+      </div><p class="sub">課程、題庫和無限練習答錯的題目都會收進錯題本，之後一次答對就會移出。</p></div>
+      <button class="btn primary wide" data-rand="1">${inGen ? '再來一題' : '隨機出一題'}</button>`;
+    $('#bankMini').textContent = `連續答對 ${B.streak}　·　錯題 ${wrongN}`;
+  }
+  function openBankProblem(e, isDaily) {
+    bankCur = { e, isDaily };
+    BP.start(e);
+  }
+  function randomBank() {
+    ensureBP();
+    if (bankFilter.mode === 'gen') {
+      let p = null;
+      for (let k = 0; k < 5 && !p; k++) p = GoGen.make(bankFilter.gen, bankFilter.glevel, (Math.random() * 1e9) | 0);
+      if (p) return openBankProblem(p, false);
+    }
+    const pool = bankPool();
+    if (!pool.length) { $('#bankMain').innerHTML = `<div class="empty"><p class="q">${bankFilter.mode === 'wrong' ? '錯題本是空的，太厲害了！' : '這個範圍的題目都解完了。'}</p><p class="sub">換一個主題或範圍，或試試無限練習。</p></div>`; BP = null; return; }
+    let e = pool[(Math.random() * pool.length) | 0];
+    if (pool.length > 1 && bankCur && e.id === bankCur.e.id) e = pool[(pool.indexOf(e) + 1) % pool.length];
+    openBankProblem(e, false);
+  }
+  function ensureBP() {
+    if (BP && document.body.contains(BP.root)) return;
+    $('#bankMain').innerHTML = '<section class="practice wide-practice" id="bankPractice" aria-live="polite"></section>';
+    BP = makePractice($('#bankPractice'), {
+      header: () => {
+        const e = bankCur.e, topic = BANK_TOPICS.find(t => t.id === e.topic) || { name: e.topicName || '' }, lv = Math.min(3, e.level || 1);
+        return `<div class="practice-head"><span class="label">${bankCur.isDaily ? '今日一題 · ' : e.generated ? '無限練習 · ' : ''}${topic.name} · ${e.lessonTitle}</span><span class="stars" aria-label="難度 ${lv}">${'●'.repeat(lv)}${'○'.repeat(3 - lv)}</span></div>`;
+      },
+      onResult: (e, clean) => {
+        const B = S.bank;
+        if (e.generated) B.genSolved = (B.genSolved || 0) + 1; else B.solved[e.id] = 1;
+        if (clean) { B.streak++; B.best = Math.max(B.best, B.streak); delete B.wrong[e.id]; }
+        if (bankCur.isDaily) B.daily = { date: todayStr(), done: true };
+        save(); renderBankSide();
+      },
+      onMiss: (e) => {
+        const W = S.bank.wrong; W[e.id] = Date.now(); S.bank.streak = 0;
+        const ids = Object.keys(W); if (ids.length > 80) ids.sort((a, b) => W[a] - W[b]).slice(0, ids.length - 80).forEach(k => delete W[k]);
+        save(); renderBankSide();
+      },
+      next: (ok) => `<button class="btn ${ok ? 'primary' : ''}" data-act="bnext">下一題 →</button>`,
+      footer: () => { const e = bankCur.e; if (!e.classic) return ''; return e.classic === 'ggg' ? `<p class="credit">題目：<a href="https://github.com/gogameguru/go-problems" target="_blank" rel="noopener">Go Game Guru Weekly Go Problems</a>（An Younggil、David Ormerod），依 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hant" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a> 使用；本站裁切盤面並改寫為互動題。</p>` : `<p class="credit">題目：清代古譜《官子譜》（公有領域）。SGF 由 Flygo 整理、<a href="https://www.u-go.net/classic/" target="_blank" rel="noopener">u-go.net</a> 發布，經 <a href="https://github.com/tasuki/tsumego" target="_blank" rel="noopener">tasuki/tsumego</a> 去除重複並編號；本站換色為黑先。</p>`; },
+      click: (t) => { if (t.closest('[data-act="bnext"]')) randomBank(); }
+    });
+  }
+  $('#bankFilterBtn').addEventListener('click', () => { const v = $('#view-bank'); v.classList.toggle('side-open'); $('#bankFilterBtn').setAttribute('aria-expanded', v.classList.contains('side-open')); });
+  $('#bankSide').addEventListener('click', e => {
+    const t = e.target;
+    if (t.closest('[data-gen],[data-topic],[data-mode],[data-rand],[data-daily],[data-kind],[data-csrc],[data-clv]')) { $('#view-bank').classList.remove('side-open'); $('#bankFilterBtn').setAttribute('aria-expanded', 'false'); }
+    const gn = t.closest('[data-gen]'); if (gn) { bankFilter.mode = 'gen'; bankFilter.gen = gn.dataset.gen; renderBankSide(); randomBank(); return; }
+    const gl = t.closest('[data-glevel]'); if (gl) { bankFilter.glevel = +gl.dataset.glevel; if (bankFilter.mode === 'gen') { renderBankSide(); randomBank(); } else renderBankSide(); return; }
+    const cs = t.closest('[data-csrc]'); if (cs) { bankFilter.mode = 'classic'; bankFilter.csrc = cs.dataset.csrc; renderBankSide(); randomBank(); return; }
+    const cv = t.closest('[data-clv]'); if (cv) { bankFilter.mode = 'classic'; bankFilter.clv = +cv.dataset.clv; renderBankSide(); randomBank(); return; }
+    const kd = t.closest('[data-kind]'); if (kd) { bankFilter.kind = kd.dataset.kind; if (bankFilter.mode === 'gen') bankFilter.mode = 'all'; renderBankSide(); randomBank(); return; }
+    const tp = t.closest('[data-topic]'); if (tp) { bankFilter.topic = tp.dataset.topic; if (bankFilter.mode === 'gen') bankFilter.mode = 'all'; renderBankSide(); randomBank(); return; }
+    const md = t.closest('[data-mode]'); if (md) { bankFilter.mode = md.dataset.mode; if (md.dataset.mode === 'wrong') bankFilter.topic = 'all'; renderBankSide(); randomBank(); return; }
+    if (t.closest('[data-rand]')) return randomBank();
+    if (t.closest('[data-daily]')) { ensureBP(); openBankProblem(dailyProblem(), true); }
+  });
+  function renderBank() { renderBankSide(); if (!BP || !document.body.contains(BP.root)) { ensureBP(); openBankProblem(dailyProblem(), true); } }
+
+  // ---------------- play view (vs computer) ----------------
+  const KOMI = 7;
+  const G = { size: 9, n: 9, g: new Array(81).fill(0), ko: -1, turn: 1, hist: [], last: -1, caps: [0, 0], passes: 0, over: false, scoring: false, dead: new Set(), own: null, hint: -1, thinking: false, msg: null, opp: 'simple', me: 1 };
+  function newGame() {
+    G.n = G.size;
+    Object.assign(G, { g: new Array(G.n * G.n).fill(0), ko: -1, turn: 1, hist: [], last: -1, caps: [0, 0], passes: 0, over: false, scoring: false, dead: new Set(), own: null, hint: -1, thinking: false, msg: null });
+    renderPlay(); maybeAI();
+  }
+  const aiTurn = () => G.opp !== 'human' && G.turn !== G.me && !G.over;
+  function snapshot() { G.hist.push({ g: G.g, ko: G.ko, turn: G.turn, last: G.last, caps: G.caps.slice(), passes: G.passes }); }
+  function doMove(i) {
+    const r = Go.play(G.n, G.g, i, G.turn, G.ko);
+    if (!r.ok) return r;
+    snapshot();
+    G.caps[G.turn - 1] += r.captured.length; G.g = r.g; G.ko = r.ko; G.last = i; G.turn = 3 - G.turn; G.passes = 0; G.own = null; G.hint = -1;
+    return r;
+  }
+  function doPass() {
+    snapshot(); G.passes++; G.ko = -1; G.last = -1; G.own = null; G.hint = -1;
+    const who = G.turn === 1 ? '黑' : '白'; G.turn = 3 - G.turn;
+    if (G.passes >= 2) return enterScoring();
+    G.msg = { kind: '', title: '虛手', text: `${who}棋虛手，換對方下。對方也虛手的話，就會結束並數地。` };
+  }
+  function enterScoring() {
+    G.over = true; G.scoring = true; G.msg = { kind: '', title: '對局結束', text: '正在判斷死子…' }; renderPlay();
+    GoAI.think(G.g, G.n, -1, G.turn, { timeMs: 900, komi: KOMI, onDone: res => {
+      G.dead = new Set();
+      for (let i = 0; i < G.n * G.n; i++) if (G.g[i] === 1 && res.own[i] < -0.5 || G.g[i] === 2 && res.own[i] > 0.5) G.dead.add(i);
+      showScore(); renderPlay();
+    } });
+  }
+  function showScore() {
+    const sc = Go.score(G.n, G.g, G.dead); const w = sc.white + KOMI, diff = sc.black - w;
+    const result = diff > 0 ? `黑棋贏 ${diff} 點` : diff < 0 ? `白棋贏 ${-diff} 點` : '和棋';
+    G.own = sc.own.map(v => v === 1 ? 1 : v === 2 ? -1 : 0);
+    G.msg = { kind: 'right', title: result, text: `黑棋 ${sc.black} 點；白棋 ${sc.white} 點，加貼目 ${KOMI} 點，共 ${w} 點。半透明的棋子判定為死子，點一下可以改判。` };
+  }
+  function maybeAI() {
+    if (!aiTurn()) return;
+    G.thinking = true; renderPlay();
+    const col = G.turn;
+    const finish = (m, rate) => {
+      G.thinking = false;
+      if (G.over) return;
+      if (m < 0) doPass(); else doMove(m);
+      if (!G.over) G.msg = rate != null && rate < 0.08 ? { kind: '', title: '電腦覺得不太妙', text: '進階電腦估計自己贏面很低，你下得很好！' } : null;
+      if (G.passes === 1 && G.turn === G.me) G.msg = { kind: '', title: '電腦虛手', text: '電腦覺得沒有地方可以下了。你也虛手就會結束並數地。' };
+      renderPlay();
+    };
+    if (G.opp === 'simple') {
+      setTimeout(() => {
+        const m = G.passes > 0 ? -1 : GoAI.simpleMove(G.g, G.n, G.ko, col);
+        finish(m);
+      }, 350);
+    } else {
+      GoAI.think(G.g, G.n, G.ko, col, { timeMs: G.n === 9 ? 1800 : G.n === 13 ? 2600 : 3200, komi: KOMI, onDone: res => {
+        let m = res.move;
+        if (G.passes > 0 && res.winRate > 0.5) m = -1;
+        finish(m, res.winRate);
+      } });
+    }
+  }
+  function renderPlay() {
+    const marks = {}; if (G.hint >= 0) marks[key(Math.floor(G.hint / G.n), G.hint % G.n)] = 'hint';
+    const interactive = G.scoring ? true : (!G.over && !G.thinking && !aiTurn());
+    const turnTxt = G.over ? '對局結束' : G.thinking ? '電腦思考中…' : `輪到<b>${G.turn === 1 ? '黑' : '白'}</b>${G.opp !== 'human' ? (G.turn === G.me ? '（你）' : '（電腦）') : ''}`;
+    $('#playBoard').innerHTML = `<p class="q">${turnTxt}</p>` + boardSVG(G.n, G.g, { marks, interactive, clickStones: G.scoring, turn: G.turn, last: G.last, newStone: G.last, own: G.own, dead: G.scoring ? G.dead : null }) +
+      `<div class="stat">提子　黑 ${G.caps[0]}　·　白 ${G.caps[1]}　·　白貼 ${KOMI} 點</div>` +
+      (G.msg ? `<div class="feedback ${G.msg.kind}"><strong>${G.msg.title}</strong>${G.msg.text}</div>` : '');
+    const busy = G.thinking;
+    $('#playCtl').innerHTML = `
+      <div class="filter"><span class="label">對手</span><div class="chips">
+        <button data-opp="simple" aria-pressed="${G.opp === 'simple'}">入門電腦</button>
+        <button data-opp="mcts" aria-pressed="${G.opp === 'mcts'}">進階電腦</button>
+        <button data-opp="human" aria-pressed="${G.opp === 'human'}">雙人對下</button></div></div>
+      <div class="filter"><span class="label">棋盤</span><div class="chips">
+        ${[9, 13, 19].map(z => `<button data-size="${z}" aria-pressed="${G.size === z}">${z} 路</button>`).join('')}</div></div>
+      ${G.opp !== 'human' ? `<div class="filter"><span class="label">我執</span><div class="chips">
+        <button data-me="1" aria-pressed="${G.me === 1}">黑棋（先下）</button><button data-me="2" aria-pressed="${G.me === 2}">白棋</button></div></div>` : ''}
+      <div class="ctl-grid">
+        <button class="btn" data-pa="undo" ${busy || !G.hist.length ? 'disabled' : ''}>悔棋</button>
+        <button class="btn" data-pa="pass" ${busy || G.over || aiTurn() ? 'disabled' : ''}>虛手</button>
+        <button class="btn" data-pa="hint" ${busy || G.over || aiTurn() ? 'disabled' : ''}>提示</button>
+        <button class="btn" data-pa="judge" ${busy || G.over ? 'disabled' : ''}>形勢判斷</button>
+      </div>
+      <button class="btn primary wide" data-pa="new" ${busy ? 'disabled' : ''}>新的一局</button>
+      ${G.size > 9 && G.opp === 'mcts' ? '<p class="sub">棋盤越大，進階電腦每手能模擬的盤數越少，棋力會變弱，思考也比較久。</p>' : ''}
+      <p class="sub">換對手、顏色或棋盤大小後，按「新的一局」開始。<br>形勢判斷：黑色方塊是黑棋可能的地，白色方塊是白棋的，顏色越深越確定。</p>`;
+  }
+  $('#playBoard').addEventListener('click', e => {
+    const hit = e.target.closest('.hit'); if (!hit) return;
+    const i = +hit.dataset.i;
+    if (G.scoring) {
+      if (!G.g[i]) return;
+      const gr = Go.group(G.n, G.g, i); const isDead = G.dead.has(i);
+      gr.stones.forEach(s => isDead ? G.dead.delete(s) : G.dead.add(s));
+      showScore(); return renderPlay();
+    }
+    const r = doMove(i);
+    if (!r.ok) { G.msg = { kind: 'wrong', title: '這裡不能下', text: r.reason === 'ko' ? '打劫：剛被提的子不能馬上提回，請先下別的地方。' : '這是禁著點，下了會沒有氣。' }; return renderPlay(); }
+    G.msg = null; renderPlay(); maybeAI();
+  });
+  $('#playCtl').addEventListener('click', e => {
+    const t = e.target;
+    const o = t.closest('[data-opp]'); if (o) { G.opp = o.dataset.opp; return renderPlay(); }
+    const m = t.closest('[data-me]'); if (m) { G.me = +m.dataset.me; return renderPlay(); }
+    const z = t.closest('[data-size]'); if (z) { G.size = +z.dataset.size; return renderPlay(); }
+    const a = t.closest('[data-pa]'); if (!a || a.disabled) return;
+    const act = a.dataset.pa;
+    if (act === 'new') return newGame();
+    if (act === 'undo') {
+      const back = G.opp !== 'human' && G.hist.length >= 2 && G.turn === G.me ? 2 : 1;
+      for (let k = 0; k < back && G.hist.length; k++) Object.assign(G, G.hist.pop());
+      Object.assign(G, { over: false, scoring: false, dead: new Set(), own: null, hint: -1, msg: null });
+      renderPlay(); return maybeAI();
+    }
+    if (act === 'pass') { doPass(); renderPlay(); if (!G.over) maybeAI(); return; }
+    if (act === 'hint' || act === 'judge') {
+      G.thinking = true; renderPlay();
+      GoAI.think(G.g, G.n, G.ko, G.turn, { timeMs: (act === 'hint' ? 1500 : 1200) * (G.n === 9 ? 1 : 1.6), komi: KOMI, onDone: res => {
+        G.thinking = false;
+        if (act === 'hint') { G.hint = res.move; G.msg = { kind: '', title: '提示', text: res.move >= 0 ? '虛線圈是電腦推薦的位置。' : '電腦覺得現在可以虛手了。' }; }
+        else {
+          G.own = res.own; const lead = res.blackLead, who = lead >= 0 ? '黑棋' : '白棋';
+          const rateB = G.turn === 1 ? res.winRate : 1 - res.winRate;
+          G.msg = { kind: '', title: '形勢判斷', text: `${who}目前約領先 ${Math.abs(lead).toFixed(1)} 點（已含白棋貼目 ${KOMI} 點）。黑棋勝率約 ${Math.round(rateB * 100)}%。這是電腦模擬的估計，局面越早越不準。` };
+        }
+        renderPlay();
+      } });
+    }
+  });
+
+  // ---------------- router ----------------
+  const VIEWS = ['lessons', 'bank', 'play', 'res'];
+  function show(v) {
+    if (!VIEWS.includes(v)) v = 'lessons';
+    VIEWS.forEach(x => { $('#view-' + x).hidden = x !== v; });
+    document.querySelectorAll('[data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === v ? 'page' : 'false'));
+    if (v === 'bank') renderBank();
+    if (v === 'play') renderPlay();
+    if (v === 'res') renderRes();
+  }
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-tab],[data-go]'); if (!t) return;
+    const v = t.dataset.tab || t.dataset.go;
+    try { location.hash = v; } catch (err) {}
+    closeRail(); show(v); window.scrollTo({ top: 0 });
+  });
+  window.addEventListener('hashchange', () => show(location.hash.slice(1)));
+  function refreshAll() { renderLesson(); if (!$('#view-bank').hidden) renderBankSide(); }
+
+  renderSync();
+  renderLesson();
+  show((location.hash || '#lessons').slice(1));
+  const boot = document.getElementById('boot');
+  if (boot) { boot.classList.add('done'); setTimeout(() => boot.remove(), 350); }
+})();
+
+</script>
