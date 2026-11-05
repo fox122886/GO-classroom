@@ -1526,6 +1526,8 @@ const CLASSIC_RAW = [{"id":"ggg-e1","src":"ggg","no":1,"set":"easy","lv":1,"n":8
     gzp: { name: '官子譜', full: '《官子譜》（明・過百齡 著，清・陶式玉 編注）' }
   };
   const CLV = ['', '一星', '二星', '三星'];
+  // links kept in plain strings: Apps Script strips text after // inside template literals
+  const LINK = { ggg: 'https://github.com/gogameguru/go-problems', ugo: 'https://www.u-go.net/classic/', tasuki: 'https://github.com/tasuki/tsumego', ccbyncsa: 'https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hant' };
   function decodeClassic(p) {
     const A = 'abcdefghijklmnopqrstuvwxyz', n = p.n, rows = [];
     for (let r = 0; r < n; r++) rows.push(new Array(n).fill('.'));
@@ -2060,8 +2062,8 @@ const CLASSIC_RAW = [{"id":"ggg-e1","src":"ggg","no":1,"set":"easy","lv":1,"n":8
         ${Object.entries(SOURCES).map(([k, src]) => `<li><a href="${src.url}" target="_blank" rel="noopener">${src.title}</a><span>${src.by}</span><span>取得方式：${src.access}</span><span>本站參考的部分：${src.use}${used[k] ? `（用於：${[...new Set(used[k])].join('、')}）` : ''}</span></li>`).join('')}
       </ul></section>
       <section><h3>經典題庫的來源與授權</h3><ul class="links">
-        <li><a href="https://github.com/gogameguru/go-problems" target="_blank" rel="noopener">Go Game Guru：Weekly Go Problems</a><span>An Younggil（職業八段）、David Ormerod 編寫，簡單、中級、困難各 140 題，附完整的正解與失敗變化。</span><span>授權：<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hant" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a>（姓名標示、非商業性、相同方式分享）。</span><span>本站的改作：裁切盤面、轉成互動題、依原作「簡單／中級／困難」標成一到三星；原作者的英文講解由本站翻譯成中文，標示為「原作者講解」。這些改作部分同樣以 CC BY-NC-SA 4.0 提供，限非商業用途。</span></li>
-        <li><a href="https://www.u-go.net/classic/" target="_blank" rel="noopener">《官子譜》</a><span>明代過百齡原著、清代陶式玉編注的古典棋譜，屬公有領域。</span><span>資料：SGF 由 Flygo 整理、Ulrich Goertz 在 u-go.net 發布並註明可轉載；本站使用 <a href="https://github.com/tasuki/tsumego" target="_blank" rel="noopener">tasuki/tsumego</a> 收錄的版本與其去除重複後的 1107 題編號。原 SGF 沒有附講解。</span><span>本站的改作：原書多為白先，這裡把黑白對調成黑先；依正解手數分成一到三星（1～3 手、4～7 手、8 手以上）。全書屬有段者程度，一星也不簡單。每一手的說明是程式依盤面自動產生的，不是原書內容。</span></li>
+        <li><a href="${LINK.ggg}" target="_blank" rel="noopener">Go Game Guru：Weekly Go Problems</a><span>An Younggil（職業八段）、David Ormerod 編寫，簡單、中級、困難各 140 題，附完整的正解與失敗變化。</span><span>授權：<a href="${LINK.ccbyncsa}" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a>（姓名標示、非商業性、相同方式分享）。</span><span>本站的改作：裁切盤面、轉成互動題、依原作「簡單／中級／困難」標成一到三星；原作者的英文講解由本站翻譯成中文，標示為「原作者講解」。這些改作部分同樣以 CC BY-NC-SA 4.0 提供，限非商業用途。</span></li>
+        <li><a href="${LINK.ugo}" target="_blank" rel="noopener">《官子譜》</a><span>明代過百齡原著、清代陶式玉編注的古典棋譜，屬公有領域。</span><span>資料：SGF 由 Flygo 整理、Ulrich Goertz 在 u-go.net 發布並註明可轉載；本站使用 <a href="${LINK.tasuki}" target="_blank" rel="noopener">tasuki/tsumego</a> 收錄的版本與其去除重複後的 1107 題編號。原 SGF 沒有附講解。</span><span>本站的改作：原書多為白先，這裡把黑白對調成黑先；依正解手數分成一到三星（1～3 手、4～7 手、8 手以上）。全書屬有段者程度，一星也不簡單。每一手的說明是程式依盤面自動產生的，不是原書內容。</span></li>
       </ul><p class="sub">《玄玄棋經》目前沒有找到附答案、而且授權清楚的公開資料，所以暫未收錄。</p></section>
       <section><h3>延伸學習</h3><ul class="links">
         ${ext.map(([u, t, d]) => `<li><a href="${u}" target="_blank" rel="noopener">${t}</a><span>${d}</span></li>`).join('')}
@@ -2234,7 +2236,7 @@ const CLASSIC_RAW = [{"id":"ggg-e1","src":"ggg","no":1,"set":"easy","lv":1,"n":8
         save(); renderBankSide();
       },
       next: (ok) => `<button class="btn ${ok ? 'primary' : ''}" data-act="bnext">下一題 →</button>`,
-      footer: () => { const e = bankCur.e; if (!e.classic) return ''; return e.classic === 'ggg' ? `<p class="credit">題目：<a href="https://github.com/gogameguru/go-problems" target="_blank" rel="noopener">Go Game Guru Weekly Go Problems</a>（An Younggil、David Ormerod），依 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hant" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a> 使用；本站裁切盤面並改寫為互動題。</p>` : `<p class="credit">題目：清代古譜《官子譜》（公有領域）。SGF 由 Flygo 整理、<a href="https://www.u-go.net/classic/" target="_blank" rel="noopener">u-go.net</a> 發布，經 <a href="https://github.com/tasuki/tsumego" target="_blank" rel="noopener">tasuki/tsumego</a> 去除重複並編號；本站換色為黑先。</p>`; },
+      footer: () => { const e = bankCur.e; if (!e.classic) return ''; return e.classic === 'ggg' ? `<p class="credit">題目：<a href="${LINK.ggg}" target="_blank" rel="noopener">Go Game Guru Weekly Go Problems</a>（An Younggil、David Ormerod），依 <a href="${LINK.ccbyncsa}" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a> 使用；本站裁切盤面並改寫為互動題。</p>` : `<p class="credit">題目：清代古譜《官子譜》（公有領域）。SGF 由 Flygo 整理、<a href="${LINK.ugo}" target="_blank" rel="noopener">u-go.net</a> 發布，經 <a href="${LINK.tasuki}" target="_blank" rel="noopener">tasuki/tsumego</a> 去除重複並編號；本站換色為黑先。</p>`; },
       click: (t) => { if (t.closest('[data-act="bnext"]')) randomBank(); }
     });
   }

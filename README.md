@@ -47,6 +47,8 @@ python3 build.py                # 產生 out/gas/* 與 out/preview.html
 
 重新產生死活題庫：`node ldgen.js`。
 
+部署前檢查：`npm i acorn && node tools/check_gas_safe.js`。Apps Script 送出網頁時會移除 `//` 註解，而且會把樣板字串（反引號）裡的 `//` 也當成註解切掉，所以網址要放在一般字串裡。
+
 ## 部署到 Google Apps Script
 
 1. 在 Apps Script 專案裡建立 `Code.gs`，以及 `index`、`lib`、`content`、`ldbank`、`classic`、`app` 六個 HTML 檔，內容分別貼上 `out/gas/` 對應的檔案。
